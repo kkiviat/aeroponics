@@ -2,8 +2,10 @@
 #include <dht_nonblocking.h>
 #include "EspMQTTClient.h"
 #include <ESP_EEPROM.h>
+#include <InfluxDbClient.h>
+#include <InfluxDbCloud.h>
 
-#define DEBUG
+//#define DEBUG
 
 // =============================
 // Pin definitions
@@ -19,8 +21,6 @@ const int mistSolenoid = D1;  // GPIO5
 const int drainSolenoid = D2; // GPIO4
 // GPIO5, GPIO4 only pins low on boot
 // https://community.blynk.cc/t/esp8266-gpio-pins-info-restrictions-and-features/22872
-
-
 
 // =============================
 // MQTT setup
@@ -125,6 +125,103 @@ void publishConfig() {
 
 
 // =============================
+// Misting state
+// =============================
+enum MistingState { none, mist, bleed, full_drain, waiting };
+MistingState mistingState = waiting; // start in waiting in case pressure is low
+int bleedDuration = 500; // 0.5 seconds
+
+static void updateSolenoids() {
+  static unsigned long lastMistTime = 0;
+  static unsigned long bleedStart = 0;
+
+  if (mistingState == full_drain) {
+    digitalWrite(mistSolenoid, HIGH);
+    digitalWrite(drainSolenoid, HIGH);
+    return;
+  }
+
+  if (mistingState == none && millis() - lastMistTime > settings.mist_interval_millis) {
+    Serial.println("Starting misting");
+    digitalWrite(mistSolenoid, HIGH);
+    digitalWrite(drainSolenoid, LOW);
+    lastMistTime = millis();
+    mistingState = mist;
+    logMisting();
+    return;
+  }
+  if (mistingState == mist && millis() - lastMistTime > settings.mist_duration_millis) {
+    // Stop misting, start draining
+    Serial.printf("Stopping misting after %d millis\n", millis() - lastMistTime);
+    Serial.println("Starting bleeding");
+    digitalWrite(mistSolenoid, LOW);
+    digitalWrite(drainSolenoid, HIGH);
+    bleedStart = millis();
+    mistingState = bleed;
+    return;
+  }
+  if (mistingState == bleed && millis() - bleedStart > bleedDuration) {
+    // Stop draining
+    Serial.printf("Stopping bleeding after %d millis\n", millis() - bleedStart);
+    digitalWrite(drainSolenoid, LOW);
+    digitalWrite(mistSolenoid, LOW);
+    mistingState = none;
+    return;
+  }
+}
+
+void logMisting() {
+  
+}
+
+
+// =============================
+// InfluxDB
+// =============================
+// InfluxDB v2 server url, e.g. https://eu-central-1-1.aws.cloud2.influxdata.com (Use: InfluxDB UI -> Load Data -> Client Libraries)
+#define INFLUXDB_URL "https://us-central1-1.gcp.cloud2.influxdata.com"
+// InfluxDB v2 server or cloud API authentication token (Use: InfluxDB UI -> Data -> Tokens -> <select token>)
+#define INFLUXDB_TOKEN "***REMOVED***"
+// InfluxDB v2 organization id (Use: InfluxDB UI -> User -> About -> Common Ids )
+#define INFLUXDB_ORG "***REMOVED***"
+// InfluxDB v2 bucket name (Use: InfluxDB UI ->  Data -> Buckets)
+#define INFLUXDB_BUCKET "hopespringsup's Bucket"
+
+// Set timezone string according to https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
+// Examples:
+//  Pacific Time: "PST8PDT"
+//  Eastern: "EST5EDT"
+//  Japanesse: "JST-9"
+//  Central Europe: "CET-1CEST,M3.5.0,M10.5.0/3"
+#define TZ_INFO "PST8PDT"
+
+// InfluxDB client instance with preconfigured InfluxCloud certificate
+InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
+
+// Data point
+Point ambientPoint("ambient");
+Point pressurePoint("pressure");
+Point pumpStatusPoint("pump status");
+
+void writeToInfluxDB(Point point) {
+  if (mistingState == mist || mistingState == bleed) {
+    // Writing is too slow to do during precise time events
+    return;
+  }
+      // Print what are we exactly writing
+#ifdef DEBUG
+    Serial.print("Writing: ");
+    Serial.println(point.toLineProtocol());
+#endif
+  
+    // Write point
+    if (!influxClient.writePoint(point)) {
+      Serial.print("InfluxDB write failed: ");
+      Serial.println(influxClient.getLastErrorMessage());
+    }
+}
+
+// =============================
 // Temperature and Humidity setup
 // =============================
 #define DHT_SENSOR_TYPE DHT_TYPE_11
@@ -136,21 +233,20 @@ const int temperatureInterval = 30000; // 30 seconds between readings
  * Poll for a measurement, keeping the state machine alive.  Returns
  * true if a measurement is available.
  */
-static bool measure_environment( float *temperature, float *humidity )
-{
-  static unsigned long measurement_timestamp = millis( );
+static bool measure_environment(float *temperature, float *humidity) {
+  static unsigned long measurement_timestamp = millis();
 
   /* Measure once every four seconds. */
-  if( millis( ) - measurement_timestamp > temperatureInterval )
+  if (millis( ) - measurement_timestamp > temperatureInterval)
   {
-    if( dht_sensor.measure( temperature, humidity ) == true )
+    if (dht_sensor.measure( temperature, humidity))
     {
       measurement_timestamp = millis( );
-      return( true );
+      return(true);
     }
   }
 
-  return( false );
+  return(false);
 }
 
 // =============================
@@ -165,7 +261,6 @@ bool lastPressureReadingHigh = false;
 float analogToPSI(const float& analogReading) {
   // Determined through experiment / line fitting to match analog gauge
   float psi = analogReading * 0.296 - 25.9;
-  Serial.printf("psi = %f\n", psi);
   return(psi);
 }
 
@@ -180,57 +275,28 @@ static bool measurePressure( float *pressure ) {
   return(false);
 }
 
+void logPumpStatus() {
+  client.publish(mqttPumpStatus, pumpOn ? "on" : "off", true);
 
-// =============================
-// Misting state
-// =============================
-enum MistingState { none, mist, bleed, full_drain, disabled };
-MistingState mistingState = none;
-int bleedDuration = 500; // 0.5 seconds
+  // Clear fields for reusing the point. Tags will remain untouched
+    pumpStatusPoint.clearFields();
+  
+    // Store measured value into point
+    pumpStatusPoint.addField("status", pumpOn ? 1 : 0);
+  
+    writeToInfluxDB(pumpStatusPoint);
+}
 
+void logPressure(float pressure) {
+  client.publish(mqttPressure, String(pressure).c_str(), true);
 
-static void updateSolenoids() {
-  //static MistingState mistState = none;
-  static unsigned long lastMistTime = 0;
-  static unsigned long bleedStart = 0;
+  // Clear fields for reusing the point. Tags will remain untouched
+  pressurePoint.clearFields();
 
-  if (mistingState == disabled) {
-    digitalWrite(mistSolenoid, LOW);
-    digitalWrite(drainSolenoid, LOW);
-    return;
-  }
+  // Store measured value into point
+  pressurePoint.addField("psi", pressure);
 
-  if (mistingState == full_drain) {
-    digitalWrite(mistSolenoid, HIGH);
-    digitalWrite(drainSolenoid, HIGH);
-    return;
-  }
-
-  if (mistingState == none && millis() - lastMistTime > settings.mist_interval_millis) {
-    Serial.println("Starting misting");
-    digitalWrite(mistSolenoid, HIGH);
-    digitalWrite(drainSolenoid, LOW);
-    lastMistTime = millis();
-    mistingState = mist;
-    return;
-  }
-  if (mistingState == mist && millis() - lastMistTime > settings.mist_duration_millis) {
-    // Stop misting, start draining
-    //Serial.println("Starting bleeding");
-    digitalWrite(mistSolenoid, LOW);
-    digitalWrite(drainSolenoid, HIGH);
-    bleedStart = millis();
-    mistingState = bleed;
-    return;
-  }
-  if (mistingState == bleed && millis() - bleedStart > bleedDuration) {
-    // Stop draining
-    //Serial.println("Stopping bleeding");
-    digitalWrite(drainSolenoid, LOW);
-    digitalWrite(mistSolenoid, LOW);
-    mistingState = none;
-    return;
-  }
+  writeToInfluxDB(pressurePoint);
 }
 
 // =============================
@@ -252,6 +318,13 @@ void setup() {
   EEPROM.begin(sizeof(config_type));
   bool ok = loadConfig();
   Serial.printf("Loaded config,%s from storage\n", ok ? "" : " not");
+
+  // Wait a little bit to try to establish a connection
+  int count = 0;
+  while (!client.isConnected() && count < 10) {
+    count++;
+    delay(500);
+  }
   // Publish to MQTT here in case we are already connected
   publishConfig();
 }
@@ -304,6 +377,20 @@ void onConnectionEstablished() {
 //  client.subscribe("mytopic/wildcardtest/#", [](const String & topic, const String & payload) {
 //    Serial.println("(From wildcard) topic: " + topic + ", payload: " + payload);
 //  });
+
+  // Accurate time is necessary for certificate validation and writing in batches
+  // For the fastest time sync find NTP servers in your area: https://www.pool.ntp.org/zone/
+  // Syncing progress and the time will be printed to Serial.
+  timeSync(TZ_INFO, "pool.ntp.org", "time.nis.gov");
+
+  // Check InfluxDB server connection
+  if (influxClient.validateConnection()) {
+    Serial.print("Connected to InfluxDB: ");
+    Serial.println(influxClient.getServerUrl());
+  } else {
+    Serial.print("InfluxDB connection failed: ");
+    Serial.println(influxClient.getLastErrorMessage());
+  }
 
   client.subscribe(mqttCommandEnableMisting, [](const String & payload) {
     Serial.printf("got request to change misting status (%s)", payload);
@@ -391,6 +478,50 @@ void loop() {
   ArduinoOTA.handle();
   client.loop();
 
+  float pressure;
+  if (measurePressure(&pressure) == true) {
+    Serial.printf("pressure reading: %f\n", pressure);
+    logPressure(pressure);
+    if (pressure < settings.pump_min_pressure && !pumpOn) {
+      if (lastPressureReadingLow) {
+        lastPressureReadingLow = false;
+        digitalWrite(pumpRelay, HIGH);
+#ifdef DEBUG
+        Serial.println("turning pump on");
+#endif
+        pumpOn = true;
+        logPumpStatus();
+      } else {
+        lastPressureReadingLow = true;
+      }
+    }
+    if (pressure > settings.pump_max_pressure && pumpOn) {
+      if (lastPressureReadingHigh) { // Get two in a row
+        lastPressureReadingHigh = false;
+        digitalWrite(pumpRelay, LOW);
+        pumpOn = false;
+#ifdef DEBUG
+        Serial.println("turning pump off");
+#endif
+        logPumpStatus();
+      } else {
+        lastPressureReadingHigh = true;
+      }
+    }
+
+    if (pressure < settings.pump_min_pressure && settings.misting_enabled && mistingState != waiting) {
+      // don't mist when pressure is too low
+      mistingState = waiting;
+      digitalWrite(mistSolenoid, LOW);
+      digitalWrite(drainSolenoid, LOW);
+      Serial.println("changing mister state to waiting due to low pressure");
+    } else if (pressure >= settings.pump_min_pressure && mistingState == waiting) {
+      // can start once pressure is high enough
+      mistingState = none;
+      Serial.println("Pressure high enough; leaving waiting state");
+    }
+  }
+
 
 // Toggle full drain mode via switch
   if (digitalRead(switchPin) == HIGH)
@@ -414,35 +545,6 @@ void loop() {
     digitalWrite(drainSolenoid, LOW);
   }
 
-
-  float pressure;
-  if (measurePressure(&pressure) == true) {
-    Serial.printf("pressure reading: %f\n", pressure);
-    client.publish(mqttPressure, String(pressure).c_str(), true);
-    if (pressure < 80 && !pumpOn) {
-      if (lastPressureReadingLow) {
-        lastPressureReadingLow = false;
-        digitalWrite(pumpRelay, HIGH);
-        Serial.println("turning pump on");
-        pumpOn = true;
-        client.publish(mqttPumpStatus, "on", true);
-      } else {
-        lastPressureReadingLow = true;
-      }
-    }
-    if (pressure > 100 && pumpOn) {
-      if (lastPressureReadingHigh) { // Get two in a row
-        lastPressureReadingHigh = false;
-        digitalWrite(pumpRelay, LOW);
-        pumpOn = false;
-        Serial.println("turning pump off");
-        client.publish(mqttPumpStatus, "off", true);
-      } else {
-        lastPressureReadingHigh = true;
-      }
-    }
-  }
-
   float temperature;
   float humidity;
 
@@ -450,6 +552,7 @@ void loop() {
      true, then a measurement is available. */
   if( measure_environment( &temperature, &humidity ) == true )
   {
+#ifdef DEBUG
     Serial.print( "T = " );
     Serial.print( temperature, 1 );
     Serial.print( " deg. C (");
@@ -457,7 +560,17 @@ void loop() {
     Serial.print( " deg. F), H = " );
     Serial.print( humidity, 1 );
     Serial.println( "%" );
+#endif
     client.publish(mqttTemp1, String(temperature).c_str(), true);
     client.publish(mqttHumidity1, String(humidity).c_str(), true);
+
+    // Clear fields for reusing the point. Tags will remain untouched
+    ambientPoint.clearFields();
+  
+    // Store measured value into point
+    ambientPoint.addField("temperature", temperature);
+    ambientPoint.addField("humidity", humidity);
+
+    writeToInfluxDB(ambientPoint);
   }
 }
