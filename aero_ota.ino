@@ -58,6 +58,11 @@ EspMQTTClient client(
 #define mqttCommandSetMinPSI "aerocommand/setMinPSI"
 #define mqttCommandSetMaxPSI "aerocommand/setMaxPSI"
 
+// misting
+#define mqttLastMistTime "aero/lastMistTime"
+#define mqttNextMistTime "aero/nextMistTime"
+#define mqttPiLastMistTime "aeroPi/lastMistTime" // sent from Pi on connection established
+
 
 // =============================
 // Configuration
@@ -130,9 +135,10 @@ void publishConfig() {
 enum MistingState { none, mist, bleed, full_drain, waiting };
 MistingState mistingState = waiting; // start in waiting in case pressure is low
 int bleedDuration = 500; // 0.5 seconds
+unsigned long lastMistTime = 0; // time of last misting in millis since start
+int mistStartSeconds = 0; // time of last misting in epoch seconds; 0 means nothing has happened
 
 static void updateSolenoids() {
-  static unsigned long lastMistTime = 0;
   static unsigned long bleedStart = 0;
 
   if (mistingState == full_drain) {
@@ -142,11 +148,11 @@ static void updateSolenoids() {
   }
 
   if (mistingState == none && millis() - lastMistTime > settings.mist_interval_millis) {
-    Serial.println("Starting misting");
     digitalWrite(mistSolenoid, HIGH);
     digitalWrite(drainSolenoid, LOW);
     lastMistTime = millis();
     mistingState = mist;
+    mistStartSeconds = time(nullptr);
     logMisting();
     return;
   }
@@ -170,8 +176,10 @@ static void updateSolenoids() {
   }
 }
 
+// Send the time of the last misting and the time of the next scheduled misting
 void logMisting() {
-  
+  client.publish(mqttLastMistTime, String(mistStartSeconds).c_str());
+  client.publish(mqttNextMistTime, String(mistStartSeconds + settings.mist_interval_millis / 1000.0).c_str());
 }
 
 
@@ -300,36 +308,6 @@ void logPressure(float pressure) {
 }
 
 // =============================
-// Setup
-// =============================
-void setup() {
-  pinMode(pumpRelay, OUTPUT);
-  pinMode(switchPin, INPUT_PULLUP);
-  pinMode(mistSolenoid, OUTPUT);
-  pinMode(drainSolenoid, OUTPUT);
-  digitalWrite(mistSolenoid, LOW);
-  digitalWrite(drainSolenoid, LOW);
-
-  Serial.begin(115200);
-
-  client.enableDebuggingMessages(); // Enable debugging messages sent to serial output
-  client.enableLastWillMessage("aero/status", "OFFLINE", true); // Message to be sent in event of disconnection
-
-  EEPROM.begin(sizeof(config_type));
-  bool ok = loadConfig();
-  Serial.printf("Loaded config,%s from storage\n", ok ? "" : " not");
-
-  // Wait a little bit to try to establish a connection
-  int count = 0;
-  while (!client.isConnected() && count < 10) {
-    count++;
-    delay(500);
-  }
-  // Publish to MQTT here in case we are already connected
-  publishConfig();
-}
-
-// =============================
 // OTA
 // =============================
 // This function is called once everything is connected (Wifi and MQTT)
@@ -392,6 +370,19 @@ void onConnectionEstablished() {
     Serial.println(influxClient.getLastErrorMessage());
   }
 
+  client.subscribe(mqttPiLastMistTime, [](const String & payload) {
+    Serial.printf("got last mist time (%s)\n", payload);
+    int receivedMistTime = payload.toInt();
+    if (receivedMistTime > mistStartSeconds) {
+      mistStartSeconds = receivedMistTime;
+      int millisSinceMisting = (time(nullptr) - mistStartSeconds) * 1000;
+      lastMistTime = millis() - millisSinceMisting;
+      Serial.printf("Setting last mist time millis to %d\n", lastMistTime);
+    } else {
+      mistStartSeconds = -1;
+    }
+  });
+
   client.subscribe(mqttCommandEnableMisting, [](const String & payload) {
     Serial.printf("got request to change misting status (%s)", payload);
     if (payload == "1") {
@@ -417,6 +408,8 @@ void onConnectionEstablished() {
       Serial.printf("Setting mist interval to %d ms\n", mistMillis);
     }
     saveConfig();
+    // update next misting time
+    client.publish(mqttNextMistTime, String(mistStartSeconds + settings.mist_interval_millis / 1000.0).c_str());
   });
 
   client.subscribe(mqttCommandSetMistDurationMillis, [](const String & payload) {
@@ -474,9 +467,51 @@ void onConnectionEstablished() {
   publishConfig();
 }
 
+// =============================
+// Setup
+// =============================
+void setup() {
+  pinMode(pumpRelay, OUTPUT);
+  pinMode(switchPin, INPUT_PULLUP);
+  pinMode(mistSolenoid, OUTPUT);
+  pinMode(drainSolenoid, OUTPUT);
+  digitalWrite(mistSolenoid, LOW);
+  digitalWrite(drainSolenoid, LOW);
+
+  Serial.begin(115200);
+
+  client.enableDebuggingMessages(); // Enable debugging messages sent to serial output
+  client.enableLastWillMessage("aero/status", "OFFLINE", true); // Message to be sent in event of disconnection
+
+  EEPROM.begin(sizeof(config_type));
+  bool ok = loadConfig();
+  Serial.printf("Loaded config,%s from storage\n", ok ? "" : " not");
+
+  // Publish to MQTT here in case we are already connected
+  publishConfig();
+}
+
 void loop() {
   ArduinoOTA.handle();
   client.loop();
+
+  if (client.getConnectionEstablishedCount() == 0 && millis() < 5000) {
+    // wait 5 seconds for connections to be established
+    return;
+  }
+
+  // Wait a short time after startup to receive last mist time from pi.
+  // Otherwise, act like we haver never misted.
+  if (client.isConnected() && mistStartSeconds == 0) {
+    // means we have never misted and have never received last mist time from pi
+    if (millis() < 10000) {
+      // wait a few seconds for pi to send last mist time
+      return;
+    }
+    if (mistStartSeconds == 0) {
+      mistStartSeconds = -1; // give up on waiting
+    }
+  }
 
   float pressure;
   if (measurePressure(&pressure) == true) {
@@ -515,8 +550,8 @@ void loop() {
       digitalWrite(mistSolenoid, LOW);
       digitalWrite(drainSolenoid, LOW);
       Serial.println("changing mister state to waiting due to low pressure");
-    } else if (pressure >= settings.pump_min_pressure && mistingState == waiting) {
-      // can start once pressure is high enough
+    } else if (mistingState == waiting && pressure >= settings.pump_min_pressure && mistStartSeconds != 0) {
+      // can start once pressure is high enough and we are not still waiting for last mist time from pi
       mistingState = none;
       Serial.println("Pressure high enough; leaving waiting state");
     }
