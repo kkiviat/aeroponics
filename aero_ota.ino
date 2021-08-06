@@ -193,7 +193,7 @@ void logMisting() {
 // InfluxDB v2 organization id (Use: InfluxDB UI -> User -> About -> Common Ids )
 #define INFLUXDB_ORG "***REMOVED***"
 // InfluxDB v2 bucket name (Use: InfluxDB UI ->  Data -> Buckets)
-#define INFLUXDB_BUCKET "hopespringsup's Bucket"
+#define INFLUXDB_BUCKET "aero"
 
 // Set timezone string according to https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
 // Examples:
@@ -209,7 +209,7 @@ InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXD
 // Data point
 Point ambientPoint("ambient");
 Point pressurePoint("pressure");
-Point pumpStatusPoint("pump status");
+Point pumpStatusPoint("pump");
 
 void writeToInfluxDB(Point point) {
   if (mistingState == mist || mistingState == bleed) {
@@ -268,16 +268,24 @@ bool lastPressureReadingHigh = false;
 // Convert the analog pin reading to PSI
 float analogToPSI(const float& analogReading) {
   // Determined through experiment / line fitting to match analog gauge
-  float psi = analogReading * 0.296 - 25.9;
+  Serial.printf("Pressure analog reading: %f\n", analogReading);
+  float psi = -38.2 + analogReading * 0.285 - 0.0000968 * analogReading * analogReading;
+
   return(psi);
 }
 
-static bool measurePressure( float *pressure ) {
+static bool measurePressure(float *pressure) {
   static unsigned long measurement_timestamp = millis();
 
+  float averagePressure = 0;
   if (millis() - measurement_timestamp > 5000) {
+    for (int i = 0; i < 5; i++) {
       *pressure = analogToPSI(analogRead(pressureSensor));
+      averagePressure += *pressure;
+      Serial.printf("Reading %d is %f\n", i, *pressure);
+    }
       measurement_timestamp = millis();
+      *pressure = averagePressure / 5;
       return(true);
   }
   return(false);
@@ -375,11 +383,19 @@ void onConnectionEstablished() {
     int receivedMistTime = payload.toInt();
     if (receivedMistTime > mistStartSeconds) {
       mistStartSeconds = receivedMistTime;
+      // Set the lastMistTime millis based on the time since the last recorded misting
       int millisSinceMisting = (time(nullptr) - mistStartSeconds) * 1000;
-      lastMistTime = millis() - millisSinceMisting;
-      Serial.printf("Setting last mist time millis to %d\n", lastMistTime);
+      if (millisSinceMisting > 0) {
+        lastMistTime = millis() - millisSinceMisting;
+        Serial.printf("Setting last mist time millis to %d\n", lastMistTime);
+      } else { // something went wrong getting current time
+        mistStartSeconds = -1;
+        Serial.printf("Not setting last mist time since it appears to be in the future (time now: %s)\n",
+          String(time(nullptr)));
+      }
     } else {
       mistStartSeconds = -1;
+      Serial.println("Received invalid misting time; ignoring");
     }
   });
 
@@ -521,9 +537,9 @@ void loop() {
       if (lastPressureReadingLow) {
         lastPressureReadingLow = false;
         digitalWrite(pumpRelay, HIGH);
-#ifdef DEBUG
+//#ifdef DEBUG
         Serial.println("turning pump on");
-#endif
+//#endif
         pumpOn = true;
         logPumpStatus();
       } else {
@@ -535,9 +551,9 @@ void loop() {
         lastPressureReadingHigh = false;
         digitalWrite(pumpRelay, LOW);
         pumpOn = false;
-#ifdef DEBUG
+//#ifdef DEBUG
         Serial.println("turning pump off");
-#endif
+//#endif
         logPumpStatus();
       } else {
         lastPressureReadingHigh = true;
