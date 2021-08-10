@@ -274,14 +274,21 @@ bool lastPressureReadingHigh = false;
 // Convert the analog pin reading to PSI
 float analogToPSI(const float& analogReading) {
   // Determined through experiment / line fitting to match analog gauge
-  Serial.printf("Pressure analog reading: %f\n", analogReading);
-  float psi = -38.2 + analogReading * 0.285 - 0.0000968 * analogReading * analogReading;
+  float psi = 0.188 * analogReading - 17.8;
 
   return(psi);
 }
 
 static bool measurePressure(float *pressure) {
   static unsigned long measurement_timestamp = millis();
+
+  if (mistingState == mist) {
+    // Don't do anything while misting.
+    // It doesn't actually seem to affect the readings currently,
+    // but I'm not sure it won't, and we anyway we don't want to
+    // do anything in response to pressure reading this while misting.
+    return false;
+  }
 
   float averageReading = 0;
   if (millis() - measurement_timestamp > 5000) {
@@ -555,6 +562,8 @@ void loop() {
       } else {
         lastPressureReadingLow = true;
       }
+    } else {
+      lastPressureReadingLow = false;
     }
     if (pressure > settings.pump_max_pressure && pumpOn) {
       if (lastPressureReadingHigh) { // Get two in a row
@@ -568,6 +577,8 @@ void loop() {
       } else {
         lastPressureReadingHigh = true;
       }
+    } else {
+      lastPressureReadingHigh = false;
     }
 
     if (pressure < settings.pump_min_pressure && settings.misting_enabled && mistingState != waiting) {
