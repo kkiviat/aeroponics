@@ -141,6 +141,12 @@ int mistStartSeconds = 0; // time of last misting in epoch seconds; 0 means noth
 static void updateSolenoids() {
   static unsigned long bleedStart = 0;
 
+  if (!settings.misting_enabled) {
+    digitalWrite(mistSolenoid, LOW);
+    digitalWrite(drainSolenoid, LOW);
+    return;
+  }
+
   if (mistingState == full_drain) {
     digitalWrite(mistSolenoid, HIGH);
     digitalWrite(drainSolenoid, HIGH);
@@ -277,16 +283,16 @@ float analogToPSI(const float& analogReading) {
 static bool measurePressure(float *pressure) {
   static unsigned long measurement_timestamp = millis();
 
-  float averagePressure = 0;
+  float averageReading = 0;
   if (millis() - measurement_timestamp > 5000) {
     for (int i = 0; i < 5; i++) {
-      *pressure = analogToPSI(analogRead(pressureSensor));
-      averagePressure += *pressure;
-      Serial.printf("Reading %d is %f\n", i, *pressure);
+      float tempReading = analogRead(pressureSensor);
+      averageReading += tempReading;
+      //Serial.printf("Reading %d is %f\n", i, tempReading);
     }
-      measurement_timestamp = millis();
-      *pressure = averagePressure / 5;
-      return(true);
+    measurement_timestamp = millis();
+    *pressure = analogToPSI(averageReading / 5);
+    return(true);
   }
   return(false);
 }
@@ -322,6 +328,10 @@ void logPressure(float pressure) {
 // WARNING : YOU MUST IMPLEMENT IT IF YOU USE EspMQTTClient
 void onConnectionEstablished() {
   ArduinoOTA.onStart([]() {
+    // Make sure we're not misting during upload
+    digitalWrite(mistSolenoid, LOW);
+    digitalWrite(drainSolenoid, LOW);
+    
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
       type = "sketch";
@@ -573,28 +583,7 @@ void loop() {
     }
   }
 
-
-// Toggle full drain mode via switch
-  if (digitalRead(switchPin) == HIGH)
-  {
-    if (mistingState != full_drain) {
-      mistingState = full_drain;
-        Serial.println("starting full drain");
-    }
-  }
-  else {
-    if (mistingState == full_drain) {
-      mistingState = none;
-      Serial.println("stopping full drain");
-    }
-  }
-
-  if (settings.misting_enabled) {
-    updateSolenoids();
-  } else {
-    digitalWrite(mistSolenoid, LOW);
-    digitalWrite(drainSolenoid, LOW);
-  }
+  updateSolenoids();
 
   float temperature;
   float humidity;
