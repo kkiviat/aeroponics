@@ -5,6 +5,8 @@
 #include <InfluxDbClient.h>
 #include <InfluxDbCloud.h>
 
+#include "config.h"
+
 //#define DEBUG
 
 // =============================
@@ -26,8 +28,8 @@ const int drainSolenoid = D2; // GPIO4
 // MQTT setup
 // =============================
 EspMQTTClient client(
-  "***REMOVED***",
-  "***REMOVED***",
+  SSID,
+  WIFI_PWD,
   "192.168.0.134",  // MQTT Broker server ip
  // "MQTTUsername",   // Can be omitted if not needed
  // "MQTTPassword",   // Can be omitted if not needed
@@ -107,7 +109,7 @@ bool loadConfig() {
   return true;
 
 }
- 
+
 // save the config to flash
 void saveConfig() {
   // set the EEPROM data ready for writing
@@ -192,14 +194,6 @@ void logMisting() {
 // =============================
 // InfluxDB
 // =============================
-// InfluxDB v2 server url, e.g. https://eu-central-1-1.aws.cloud2.influxdata.com (Use: InfluxDB UI -> Load Data -> Client Libraries)
-#define INFLUXDB_URL "https://us-central1-1.gcp.cloud2.influxdata.com"
-// InfluxDB v2 server or cloud API authentication token (Use: InfluxDB UI -> Data -> Tokens -> <select token>)
-#define INFLUXDB_TOKEN "***REMOVED***"
-// InfluxDB v2 organization id (Use: InfluxDB UI -> User -> About -> Common Ids )
-#define INFLUXDB_ORG "***REMOVED***"
-// InfluxDB v2 bucket name (Use: InfluxDB UI ->  Data -> Buckets)
-#define INFLUXDB_BUCKET "aero"
 
 // Set timezone string according to https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
 // Examples:
@@ -227,7 +221,7 @@ void writeToInfluxDB(Point point) {
     Serial.print("Writing: ");
     Serial.println(point.toLineProtocol());
 #endif
-  
+
     // Write point
     if (!influxClient.writePoint(point)) {
       Serial.print("InfluxDB write failed: ");
@@ -309,10 +303,10 @@ void logPumpStatus() {
 
   // Clear fields for reusing the point. Tags will remain untouched
     pumpStatusPoint.clearFields();
-  
+
     // Store measured value into point
     pumpStatusPoint.addField("status", pumpOn ? 1 : 0);
-  
+
     writeToInfluxDB(pumpStatusPoint);
 }
 
@@ -338,7 +332,7 @@ void onConnectionEstablished() {
     // Make sure we're not misting during upload
     digitalWrite(mistSolenoid, LOW);
     digitalWrite(drainSolenoid, LOW);
-    
+
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
       type = "sketch";
@@ -370,7 +364,7 @@ void onConnectionEstablished() {
     }
   });
   ArduinoOTA.begin();
-  
+
   // Subscribe to "mytopic/test" and display received message to Serial
 //  client.subscribe("mytopic/test", [](const String & payload) {
 //    Serial.println(payload);
@@ -433,8 +427,8 @@ void onConnectionEstablished() {
       Serial.printf("Mist interval should be >= 500 ms (got %d)\n", mistMillis);
     } else if (mistMillis <= settings.mist_duration_millis) {
       Serial.printf(
-        "Mist interval should be greater than mist duration (got %d, current mist duration is %d)\n", 
-        mistMillis, 
+        "Mist interval should be greater than mist duration (got %d, current mist duration is %d)\n",
+        mistMillis,
         settings.mist_duration_millis);
     } else {
       settings.mist_interval_millis = mistMillis;
@@ -452,8 +446,8 @@ void onConnectionEstablished() {
       Serial.printf("Mist duration should be >= 500 ms (got %d)\n", mistMillis);
     } else if (mistMillis > settings.mist_interval_millis) {
       Serial.printf(
-        "Mist duration should be less than mist interval (got %d, current mist interval is %d)\n", 
-        mistMillis, 
+        "Mist duration should be less than mist interval (got %d, current mist interval is %d)\n",
+        mistMillis,
         settings.mist_interval_millis);
     } else {
       settings.mist_duration_millis = mistMillis;
@@ -469,7 +463,7 @@ void onConnectionEstablished() {
       Serial.printf("Min PSI should be >= 10 (got %d)\n", PSI);
     } else if (PSI >= settings.pump_max_pressure) {
       Serial.printf(
-        "Min PSI should be less than max PSI (current max PSI is %d)\n", 
+        "Min PSI should be less than max PSI (current max PSI is %d)\n",
         settings.pump_max_pressure);
     }else {
       settings.pump_min_pressure = PSI;
@@ -485,7 +479,7 @@ void onConnectionEstablished() {
       Serial.printf("Max PSI should be <= 115 (got %d)\n", PSI);
     } else if (PSI <= settings.pump_min_pressure) {
       Serial.printf(
-        "Max PSI should be greater than min PSI (current min PSI is %d)\n", 
+        "Max PSI should be greater than min PSI (current min PSI is %d)\n",
         settings.pump_min_pressure);
     }else {
       settings.pump_max_pressure = PSI;
@@ -617,7 +611,7 @@ void loop() {
 
     // Clear fields for reusing the point. Tags will remain untouched
     ambientPoint.clearFields();
-  
+
     // Store measured value into point
     ambientPoint.addField("temperature", temperature);
     ambientPoint.addField("humidity", humidity);
