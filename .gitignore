@@ -1,1 +1,3 @@
 aero_control/config.h
+influxConfig.py
+__pycache__/
