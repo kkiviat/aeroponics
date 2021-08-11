@@ -6,9 +6,10 @@ import board
 import adafruit_dht
 from datetime import datetime
 
+import paho.mqtt.publish as publish
+
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
-
 import influxConfig as cfg
 
 client = InfluxDBClient(url="https://us-central1-1.gcp.cloud2.influxdata.com", token=cfg.token)
@@ -27,7 +28,7 @@ last_dht_read_time = 0
 
 dhtDevice = adafruit_dht.DHT11(DHT_PIN, use_pulseio=False)
 
-def readDHT11(pin):
+def readDHT11():
     try:
         temperature_c = dhtDevice.temperature
         temperature_f = temperature_c * (9 / 5) + 32
@@ -68,10 +69,11 @@ try:
                 .field("light", light) \
                 .time(datetime.utcnow(), WritePrecision.NS) 
             write_api.write(cfg.bucket, cfg.org, point)
+            publish.single("aero/light", light, hostname="localhost")
             last_light_read_time = time.time()
 
         if time.time() - last_dht_read_time > DHT_READ_INTERVAL:
-            result = readDHT11(DHT_PIN)
+            result = readDHT11()
             if result is not None:
                 last_dht_read_time = time.time()
                 temperature = result[0]
@@ -82,6 +84,8 @@ try:
                     .field("humidity", humidity) \
                     .time(datetime.utcnow(), WritePrecision.NS) 
                 write_api.write(cfg.bucket, cfg.org, point)
+                publish.single("aero/ambientTemp", temperature, hostname="localhost")
+                publish.single("aero/ambientHumidity", humidity, hostname="localhost")
  
 except KeyboardInterrupt:
     pass
