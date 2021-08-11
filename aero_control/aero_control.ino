@@ -9,10 +9,18 @@
 
 //#define DEBUG
 
+#ifdef DEBUG
+#  define debug_printf(...) Serial.printf(__VA_ARGS__)
+#  define debug_println(x) Serial.println(x)
+#else
+#  define debug_printf(...) do {} while (0)
+#  define debug_println(x) do {} while (0)
+#endif
+
 // =============================
 // Pin definitions
 // =============================
-const int DHT_SENSOR_PIN = D5;
+const int dhtPin = D5;
 const int solenoidRelay = D4;
 const int switchPin = D6;
 
@@ -65,6 +73,8 @@ EspMQTTClient client(
 #define mqttNextMistTime "aero/nextMistTime"
 #define mqttPiLastMistTime "aeroPi/lastMistTime" // sent from Pi on connection established
 
+#define mqttErrors "aero/error"
+
 
 // =============================
 // Configuration
@@ -102,10 +112,12 @@ bool loadConfig() {
   if (strcmp(CONFIG_VERSION, settings.config_version) != 0) {
     // config invalid; revert to default
     setDefaultConfig();
-    Serial.println("Failed to load config; reverting to default");
+    String errorMessage = "Failed to load config; reverting to default";
+    client.publish(mqttErrors, errorMessage);
+    debug_println(errorMessage);
     return false;
   }
-  Serial.printf("Loaded config %s from EEPROM\n", settings.config_version);
+  debug_printf("Loaded config %s from EEPROM\n", settings.config_version);
   return true;
 
 }
@@ -166,8 +178,8 @@ static void updateSolenoids() {
   }
   if (mistingState == mist && millis() - lastMistTime > settings.mist_duration_millis) {
     // Stop misting, start draining
-    Serial.printf("Stopping misting after %d millis\n", millis() - lastMistTime);
-    Serial.println("Starting bleeding");
+    debug_printf("Stopping misting after %d millis\n", millis() - lastMistTime);
+    debug_println("Starting bleeding");
     digitalWrite(mistSolenoid, LOW);
     digitalWrite(drainSolenoid, HIGH);
     bleedStart = millis();
@@ -176,7 +188,7 @@ static void updateSolenoids() {
   }
   if (mistingState == bleed && millis() - bleedStart > bleedDuration) {
     // Stop draining
-    Serial.printf("Stopping bleeding after %d millis\n", millis() - bleedStart);
+    debug_printf("Stopping bleeding after %d millis\n", millis() - bleedStart);
     digitalWrite(drainSolenoid, LOW);
     digitalWrite(mistSolenoid, LOW);
     mistingState = none;
@@ -196,11 +208,6 @@ void logMisting() {
 // =============================
 
 // Set timezone string according to https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
-// Examples:
-//  Pacific Time: "PST8PDT"
-//  Eastern: "EST5EDT"
-//  Japanesse: "JST-9"
-//  Central Europe: "CET-1CEST,M3.5.0,M10.5.0/3"
 #define TZ_INFO "PST8PDT"
 
 // InfluxDB client instance with preconfigured InfluxCloud certificate
@@ -214,18 +221,14 @@ Point pumpStatusPoint("pump");
 void writeToInfluxDB(Point point) {
   if (mistingState == mist || mistingState == bleed) {
     // Writing is too slow to do during precise time events
+    debug_println("Skipping InfluxDB write due to misting");
     return;
   }
-      // Print what are we exactly writing
-#ifdef DEBUG
-    Serial.print("Writing: ");
-    Serial.println(point.toLineProtocol());
-#endif
+  debug_printf("Writing: %s\n", point.toLineProtocol());
 
-    // Write point
-    if (!influxClient.writePoint(point)) {
-      Serial.print("InfluxDB write failed: ");
-      Serial.println(influxClient.getLastErrorMessage());
+  if (!influxClient.writePoint(point)) {
+    debug_printf("InfluxDB write failed: %s\n", influxClient.getLastErrorMessage());
+    client.publish(mqttErrors, influxClient.getLastErrorMessage());
     }
 }
 
@@ -234,22 +237,17 @@ void writeToInfluxDB(Point point) {
 // =============================
 #define DHT_SENSOR_TYPE DHT_TYPE_11
 
-DHT_nonblocking dht_sensor( DHT_SENSOR_PIN, DHT_SENSOR_TYPE );
+DHT_nonblocking dhtSensor(dhtPin, DHT_SENSOR_TYPE);
 const int temperatureInterval = 30000; // 30 seconds between readings
 
-/*
- * Poll for a measurement, keeping the state machine alive.  Returns
- * true if a measurement is available.
- */
-static bool measure_environment(float *temperature, float *humidity) {
-  static unsigned long measurement_timestamp = millis();
+static bool measureEnvironment(float *temperature, float *humidity) {
+  static unsigned long measurementTimestamp = millis();
 
-  /* Measure once every four seconds. */
-  if (millis( ) - measurement_timestamp > temperatureInterval)
+  if (millis() - measurementTimestamp > temperatureInterval)
   {
-    if (dht_sensor.measure( temperature, humidity))
+    if (dhtSensor.measure(temperature, humidity))
     {
-      measurement_timestamp = millis( );
+      measurementTimestamp = millis();
       return(true);
     }
   }
@@ -289,7 +287,6 @@ static bool measurePressure(float *pressure) {
     for (int i = 0; i < 5; i++) {
       float tempReading = analogRead(pressureSensor);
       averageReading += tempReading;
-      //Serial.printf("Reading %d is %f\n", i, tempReading);
     }
     measurement_timestamp = millis();
     *pressure = analogToPSI(averageReading / 5);
@@ -301,29 +298,23 @@ static bool measurePressure(float *pressure) {
 void logPumpStatus() {
   client.publish(mqttPumpStatus, pumpOn ? "on" : "off", true);
 
-  // Clear fields for reusing the point. Tags will remain untouched
-    pumpStatusPoint.clearFields();
-
-    // Store measured value into point
-    pumpStatusPoint.addField("status", pumpOn ? 1 : 0);
-
-    writeToInfluxDB(pumpStatusPoint);
+  pumpStatusPoint.clearFields();
+  pumpStatusPoint.addField("status", pumpOn ? 1 : 0);
+  
+  writeToInfluxDB(pumpStatusPoint);
 }
 
 void logPressure(float pressure) {
   client.publish(mqttPressure, String(pressure).c_str(), true);
 
-  // Clear fields for reusing the point. Tags will remain untouched
   pressurePoint.clearFields();
-
-  // Store measured value into point
   pressurePoint.addField("psi", pressure);
 
   writeToInfluxDB(pressurePoint);
 }
 
 // =============================
-// OTA
+// On Connection
 // =============================
 // This function is called once everything is connected (Wifi and MQTT)
 // WARNING : YOU MUST IMPLEMENT IT IF YOU USE EspMQTTClient
@@ -365,16 +356,6 @@ void onConnectionEstablished() {
   });
   ArduinoOTA.begin();
 
-  // Subscribe to "mytopic/test" and display received message to Serial
-//  client.subscribe("mytopic/test", [](const String & payload) {
-//    Serial.println(payload);
-//  });
-
-  // Subscribe to "mytopic/wildcardtest/#" and display received message to Serial
-//  client.subscribe("mytopic/wildcardtest/#", [](const String & topic, const String & payload) {
-//    Serial.println("(From wildcard) topic: " + topic + ", payload: " + payload);
-//  });
-
   // Accurate time is necessary for certificate validation and writing in batches
   // For the fastest time sync find NTP servers in your area: https://www.pool.ntp.org/zone/
   // Syncing progress and the time will be printed to Serial.
@@ -382,15 +363,13 @@ void onConnectionEstablished() {
 
   // Check InfluxDB server connection
   if (influxClient.validateConnection()) {
-    Serial.print("Connected to InfluxDB: ");
-    Serial.println(influxClient.getServerUrl());
+    debug_printf("Connected to InfluxDB: %s\n", influxClient.getServerUrl());
   } else {
-    Serial.print("InfluxDB connection failed: ");
-    Serial.println(influxClient.getLastErrorMessage());
+    client.publish(mqttErrors, influxClient.getLastErrorMessage());
+    debug_printf("InfluxDB connection failed: %s\n", influxClient.getLastErrorMessage());
   }
 
   client.subscribe(mqttPiLastMistTime, [](const String & payload) {
-    Serial.printf("got last mist time (%s)\n", payload);
     int receivedMistTime = payload.toInt();
     if (receivedMistTime > mistStartSeconds) {
       mistStartSeconds = receivedMistTime;
@@ -398,20 +377,24 @@ void onConnectionEstablished() {
       int millisSinceMisting = (time(nullptr) - mistStartSeconds) * 1000;
       if (millisSinceMisting > 0) {
         lastMistTime = millis() - millisSinceMisting;
-        Serial.printf("Setting last mist time millis to %d\n", lastMistTime);
+        debug_printf("Setting last mist time millis to %d\n", lastMistTime);
       } else { // something went wrong getting current time
         mistStartSeconds = -1;
-        Serial.printf("Not setting last mist time since it appears to be in the future (time now: %s)\n",
-          String(time(nullptr)));
+        String errorMessage = 
+          "Not setting last mist time: it appears to be in the future. Time now: " 
+            + String(time(nullptr));
+        client.publish(mqttErrors, errorMessage);
+        debug_println(errorMessage);
       }
     } else {
       mistStartSeconds = -1;
-      Serial.println("Received invalid misting time; ignoring");
+      String errorMessage = "Not setting last mist time: invalid value";
+      client.publish(mqttErrors, errorMessage);
+      debug_println(errorMessage);
     }
   });
 
   client.subscribe(mqttCommandEnableMisting, [](const String & payload) {
-    Serial.printf("got request to change misting status (%s)", payload);
     if (payload == "1") {
       settings.misting_enabled = true;
     } else {
@@ -421,18 +404,20 @@ void onConnectionEstablished() {
   });
 
   client.subscribe(mqttCommandSetMistIntervalMillis, [](const String & payload) {
-    Serial.printf("got request to change misting interval (%s)\n", payload);
     int mistMillis = payload.toInt();
     if (mistMillis < 500) {
-      Serial.printf("Mist interval should be >= 500 ms (got %d)\n", mistMillis);
+      String errorMessage = "Mist interval should be >= 500 ms";
+      client.publish(mqttErrors, errorMessage);
+      debug_println(errorMessage);
     } else if (mistMillis <= settings.mist_duration_millis) {
-      Serial.printf(
-        "Mist interval should be greater than mist duration (got %d, current mist duration is %d)\n",
+      client.publish(mqttErrors, "Mist interval should be greater than mist duration");
+      debug_printf(
+        "Mist interval should be greater than mist duration: got %d, current mist duration is %d\n",
         mistMillis,
         settings.mist_duration_millis);
     } else {
       settings.mist_interval_millis = mistMillis;
-      Serial.printf("Setting mist interval to %d ms\n", mistMillis);
+      debug_printf("Setting mist interval to %d ms\n", mistMillis);
     }
     saveConfig();
     // update next misting time
@@ -440,50 +425,56 @@ void onConnectionEstablished() {
   });
 
   client.subscribe(mqttCommandSetMistDurationMillis, [](const String & payload) {
-    Serial.printf("got request to change misting duration (%s)\n", payload);
     int mistMillis = payload.toInt();
     if (mistMillis < 500) {
-      Serial.printf("Mist duration should be >= 500 ms (got %d)\n", mistMillis);
+      String errorMessage = "Mist duration should be >= 500 ms";
+      client.publish(mqttErrors, errorMessage);
+      debug_println(errorMessage);
     } else if (mistMillis > settings.mist_interval_millis) {
-      Serial.printf(
-        "Mist duration should be less than mist interval (got %d, current mist interval is %d)\n",
+      client.publish(mqttErrors, "Mist duration must be less than mist interval");
+      debug_printf(
+        "Mist duration must be less than mist interval (got %d, current mist interval is %d)\n",
         mistMillis,
         settings.mist_interval_millis);
     } else {
       settings.mist_duration_millis = mistMillis;
-      Serial.printf("Setting mist duration to %d ms\n", mistMillis);
+      debug_printf("Setting mist duration to %d ms\n", mistMillis);
     }
     saveConfig();
   });
 
   client.subscribe(mqttCommandSetMinPSI, [](const String & payload) {
-    Serial.printf("got request to change min PSI (%s)\n", payload);
     int PSI = payload.toInt();
     if (PSI < 10) {
-      Serial.printf("Min PSI should be >= 10 (got %d)\n", PSI);
+      String errorMessage = "Min PSI should be >= 10";
+      client.publish(mqttErrors, errorMessage);
+      debug_println(errorMessage);
     } else if (PSI >= settings.pump_max_pressure) {
-      Serial.printf(
-        "Min PSI should be less than max PSI (current max PSI is %d)\n",
+      client.publish(mqttErrors, "Min PSI must be less than max PSI");
+      debug_printf(
+        "Min PSI must be less than max PSI (current max PSI is %d)\n",
         settings.pump_max_pressure);
     }else {
       settings.pump_min_pressure = PSI;
-      Serial.printf("Setting min PSI to %d\n", PSI);
+      debug_printf("Setting min PSI to %d\n", PSI);
     }
     saveConfig();
   });
 
   client.subscribe(mqttCommandSetMaxPSI, [](const String & payload) {
-    Serial.printf("got request to change max PSI (%s)\n", payload);
     int PSI = payload.toInt();
     if (PSI > 115) {
-      Serial.printf("Max PSI should be <= 115 (got %d)\n", PSI);
+      String errorMessage = "Max PSI should be <= 115";
+      client.publish(mqttErrors, errorMessage);
+      debug_println(errorMessage);
     } else if (PSI <= settings.pump_min_pressure) {
-      Serial.printf(
-        "Max PSI should be greater than min PSI (current min PSI is %d)\n",
+      client.publish(mqttErrors, "Max PSI must be greater than min PSI");
+      debug_printf(
+        "Max PSI must be greater than min PSI (current min PSI is %d)\n",
         settings.pump_min_pressure);
     }else {
       settings.pump_max_pressure = PSI;
-      Serial.printf("Setting max PSI to %d\n", PSI);
+      debug_printf("Setting max PSI to %d\n", PSI);
     }
     saveConfig();
   });
@@ -542,37 +533,35 @@ void loop() {
 
   float pressure;
   if (measurePressure(&pressure) == true) {
-    Serial.printf("pressure reading: %f\n", pressure);
+    debug_printf("pressure reading: %f\n", pressure);
     logPressure(pressure);
-    if (pressure < settings.pump_min_pressure && !pumpOn) {
+    
+    if (pressure > settings.pump_min_pressure) {
+      lastPressureReadingLow = false;
+    } else if (!pumpOn) {
       if (lastPressureReadingLow) {
         lastPressureReadingLow = false;
         digitalWrite(pumpRelay, HIGH);
-//#ifdef DEBUG
-        Serial.println("turning pump on");
-//#endif
+        debug_println("turning pump on");
         pumpOn = true;
         logPumpStatus();
       } else {
         lastPressureReadingLow = true;
       }
-    } else {
-      lastPressureReadingLow = false;
     }
-    if (pressure > settings.pump_max_pressure && pumpOn) {
+
+    if (pressure <= settings.pump_max_pressure) {
+      lastPressureReadingHigh = false;
+    } else if (pumpOn) {
       if (lastPressureReadingHigh) { // Get two in a row
         lastPressureReadingHigh = false;
         digitalWrite(pumpRelay, LOW);
         pumpOn = false;
-//#ifdef DEBUG
-        Serial.println("turning pump off");
-//#endif
+        debug_println("turning pump off");
         logPumpStatus();
       } else {
         lastPressureReadingHigh = true;
       }
-    } else {
-      lastPressureReadingHigh = false;
     }
 
     if (pressure < settings.pump_min_pressure && settings.misting_enabled && mistingState != waiting) {
@@ -580,11 +569,11 @@ void loop() {
       mistingState = waiting;
       digitalWrite(mistSolenoid, LOW);
       digitalWrite(drainSolenoid, LOW);
-      Serial.println("changing mister state to waiting due to low pressure");
+      debug_println("changing mister state to waiting due to low pressure");
     } else if (mistingState == waiting && pressure >= settings.pump_min_pressure && mistStartSeconds != 0) {
       // can start once pressure is high enough and we are not still waiting for last mist time from pi
       mistingState = none;
-      Serial.println("Pressure high enough; leaving waiting state");
+      debug_println("Pressure high enough; leaving waiting state");
     }
   }
 
@@ -593,26 +582,17 @@ void loop() {
   float temperature;
   float humidity;
 
-  /* Measure temperature and humidity.  If the functions returns
-     true, then a measurement is available. */
-  if( measure_environment( &temperature, &humidity ) == true )
+  if(measureEnvironment(&temperature, &humidity) == true )
   {
-#ifdef DEBUG
-    Serial.print( "T = " );
-    Serial.print( temperature, 1 );
-    Serial.print( " deg. C (");
-    Serial.print( temperature * 9.0/5 + 32, 1);
-    Serial.print( " deg. F), H = " );
-    Serial.print( humidity, 1 );
-    Serial.println( "%" );
-#endif
+    debug_printf("T = %.1f deg. C (%.1f deg. F), H = %.1f%%\n",
+      temperature,
+      temperature * 9.0 / 5 + 32,
+      humidity);
     client.publish(mqttTemp1, String(temperature).c_str(), true);
     client.publish(mqttHumidity1, String(humidity).c_str(), true);
 
-    // Clear fields for reusing the point. Tags will remain untouched
     ambientPoint.clearFields();
 
-    // Store measured value into point
     ambientPoint.addField("temperature", temperature);
     ambientPoint.addField("humidity", humidity);
 
