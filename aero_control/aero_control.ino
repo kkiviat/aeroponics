@@ -7,7 +7,7 @@
 
 #include "config.h"
 
-//#define DEBUG
+#define DEBUG
 
 #ifdef DEBUG
 #  define debug_printf(...) Serial.printf(__VA_ARGS__)
@@ -154,16 +154,17 @@ int mistStartSeconds = 0; // time of last misting in epoch seconds; 0 means noth
 
 static void updateSolenoids() {
   static unsigned long bleedStart = 0;
+  
+  static unsigned long printTime = 0;
+
+  if (millis() - printTime > 500) {
+    Serial.printf("mistingState = %d\n", mistingState);
+    printTime = millis();
+  }
 
   if (!settings.misting_enabled) {
     digitalWrite(mistSolenoid, LOW);
     digitalWrite(drainSolenoid, LOW);
-    return;
-  }
-
-  if (mistingState == full_drain) {
-    digitalWrite(mistSolenoid, HIGH);
-    digitalWrite(drainSolenoid, HIGH);
     return;
   }
 
@@ -224,11 +225,11 @@ void writeToInfluxDB(Point point) {
     debug_println("Skipping InfluxDB write due to misting");
     return;
   }
-  debug_printf("Writing: %s\n", point.toLineProtocol());
+  debug_printf("Writing: %s\n", point.toLineProtocol().c_str());
 
   if (!influxClient.writePoint(point)) {
-    debug_printf("InfluxDB write failed: %s\n", influxClient.getLastErrorMessage());
-    client.publish(mqttErrors, influxClient.getLastErrorMessage());
+    debug_printf("InfluxDB write failed: %s\n", influxClient.getLastErrorMessage().c_str());
+    client.publish(mqttErrors, influxClient.getLastErrorMessage().c_str());
     }
 }
 
@@ -240,7 +241,7 @@ void writeToInfluxDB(Point point) {
 DHT_nonblocking dhtSensor(dhtPin, DHT_SENSOR_TYPE);
 const int temperatureInterval = 30000; // 30 seconds between readings
 
-static bool measureEnvironment(float *temperature, float *humidity) {
+static bool measureTempAndHumidity(float *temperature, float *humidity) {
   static unsigned long measurementTimestamp = millis();
 
   if (millis() - measurementTimestamp > temperatureInterval)
@@ -253,6 +254,22 @@ static bool measureEnvironment(float *temperature, float *humidity) {
   }
 
   return(false);
+}
+
+void logTempAndHumidity(float temperature, float humidity) {
+  debug_printf("T = %.1f deg. C (%.1f deg. F), H = %.1f%%\n",
+      temperature,
+      temperature * 9.0 / 5 + 32,
+      humidity);
+  client.publish(mqttTemp1, String(temperature).c_str(), true);
+  client.publish(mqttHumidity1, String(humidity).c_str(), true);
+
+  ambientPoint.clearFields();
+
+  ambientPoint.addField("temperature", temperature);
+  ambientPoint.addField("humidity", humidity);
+
+  writeToInfluxDB(ambientPoint);
 }
 
 // =============================
@@ -313,12 +330,125 @@ void logPressure(float pressure) {
   writeToInfluxDB(pressurePoint);
 }
 
+
+// Callbacks
+void updateMistInterval(const String& payload) {
+  int mistMillis = payload.toInt();
+  if (mistMillis < 500) {
+    String errorMessage = "Mist interval should be >= 500 ms";
+    client.publish(mqttErrors, errorMessage);
+    debug_println(errorMessage);
+  } else if (mistMillis <= settings.mist_duration_millis) {
+    client.publish(mqttErrors, "Mist interval should be greater than mist duration");
+    debug_printf(
+      "Mist interval should be greater than mist duration: got %d, current mist duration is %d\n",
+      mistMillis,
+      settings.mist_duration_millis);
+  } else {
+    settings.mist_interval_millis = mistMillis;
+    debug_printf("Setting mist interval to %d ms\n", mistMillis);
+  }
+  saveConfig();
+  // update next misting time
+  client.publish(mqttNextMistTime, String(mistStartSeconds + settings.mist_interval_millis / 1000.0).c_str());
+}
+
+void updateMistDuration(const String& payload) {
+  int mistMillis = payload.toInt();
+  if (mistMillis < 500) {
+    String errorMessage = "Mist duration should be >= 500 ms";
+    client.publish(mqttErrors, errorMessage);
+    debug_println(errorMessage);
+  } else if (mistMillis > settings.mist_interval_millis) {
+    client.publish(mqttErrors, "Mist duration must be less than mist interval");
+    debug_printf(
+      "Mist duration must be less than mist interval (got %d, current mist interval is %d)\n",
+      mistMillis,
+      settings.mist_interval_millis);
+  } else {
+    settings.mist_duration_millis = mistMillis;
+    debug_printf("Setting mist duration to %d ms\n", mistMillis);
+  }
+  saveConfig();
+}
+
+void updateLastMistTime(const String& payload) {
+  int receivedMistTime = payload.toInt();
+  if (receivedMistTime > mistStartSeconds) {
+    mistStartSeconds = receivedMistTime;
+    // Set the lastMistTime millis based on the time since the last recorded misting
+    int millisSinceMisting = (time(nullptr) - mistStartSeconds) * 1000;
+    if (millisSinceMisting > 0) {
+      lastMistTime = millis() - millisSinceMisting;
+      debug_printf("Setting last mist time millis to %d\n", lastMistTime);
+    } else { // something went wrong getting current time
+      mistStartSeconds = -1;
+      String errorMessage = 
+        "Not setting last mist time: it appears to be in the future. Time now: " 
+          + String(time(nullptr));
+      client.publish(mqttErrors, errorMessage);
+      debug_println(errorMessage);
+    }
+  } else {
+    mistStartSeconds = -1;
+    String errorMessage = "Not setting last mist time: invalid value";
+    client.publish(mqttErrors, errorMessage);
+    debug_println(errorMessage);
+  }
+}
+
+void updateMistingEnabled(const String& payload) {
+  if (payload == "1") {
+    settings.misting_enabled = true;
+  } else {
+    settings.misting_enabled = false;
+  }
+  saveConfig();
+}
+
+void updateMinPSI(const String& payload) {
+  int PSI = payload.toInt();
+  if (PSI < 10) {
+    String errorMessage = "Min PSI should be >= 10";
+    client.publish(mqttErrors, errorMessage);
+    debug_println(errorMessage);
+  } else if (PSI >= settings.pump_max_pressure) {
+    client.publish(mqttErrors, "Min PSI must be less than max PSI");
+    debug_printf(
+      "Min PSI must be less than max PSI (current max PSI is %d)\n",
+      settings.pump_max_pressure);
+  }else {
+    settings.pump_min_pressure = PSI;
+    debug_printf("Setting min PSI to %d\n", PSI);
+  }
+  saveConfig();
+}
+
+void updateMaxPSI(const String& payload) {
+  int PSI = payload.toInt();
+  if (PSI > 115) {
+    String errorMessage = "Max PSI should be <= 115";
+    client.publish(mqttErrors, errorMessage);
+    debug_println(errorMessage);
+  } else if (PSI <= settings.pump_min_pressure) {
+    client.publish(mqttErrors, "Max PSI must be greater than min PSI");
+    debug_printf(
+      "Max PSI must be greater than min PSI (current min PSI is %d)\n",
+      settings.pump_min_pressure);
+  }else {
+    settings.pump_max_pressure = PSI;
+    debug_printf("Setting max PSI to %d\n", PSI);
+  }
+  saveConfig();
+}
+
 // =============================
 // On Connection
 // =============================
 // This function is called once everything is connected (Wifi and MQTT)
 // WARNING : YOU MUST IMPLEMENT IT IF YOU USE EspMQTTClient
 void onConnectionEstablished() {
+    Serial.println("Wifi connection established!");
   ArduinoOTA.onStart([]() {
     // Make sure we're not misting during upload
     digitalWrite(mistSolenoid, LOW);
@@ -365,119 +495,21 @@ void onConnectionEstablished() {
   if (influxClient.validateConnection()) {
     debug_printf("Connected to InfluxDB: %s\n", influxClient.getServerUrl());
   } else {
-    client.publish(mqttErrors, influxClient.getLastErrorMessage());
-    debug_printf("InfluxDB connection failed: %s\n", influxClient.getLastErrorMessage());
+    client.publish(mqttErrors, influxClient.getLastErrorMessage().c_str());
+    debug_printf("InfluxDB connection failed: %s\n", influxClient.getLastErrorMessage().c_str());
   }
+  
+  client.subscribe(mqttPiLastMistTime, updateLastMistTime);
 
-  client.subscribe(mqttPiLastMistTime, [](const String & payload) {
-    int receivedMistTime = payload.toInt();
-    if (receivedMistTime > mistStartSeconds) {
-      mistStartSeconds = receivedMistTime;
-      // Set the lastMistTime millis based on the time since the last recorded misting
-      int millisSinceMisting = (time(nullptr) - mistStartSeconds) * 1000;
-      if (millisSinceMisting > 0) {
-        lastMistTime = millis() - millisSinceMisting;
-        debug_printf("Setting last mist time millis to %d\n", lastMistTime);
-      } else { // something went wrong getting current time
-        mistStartSeconds = -1;
-        String errorMessage = 
-          "Not setting last mist time: it appears to be in the future. Time now: " 
-            + String(time(nullptr));
-        client.publish(mqttErrors, errorMessage);
-        debug_println(errorMessage);
-      }
-    } else {
-      mistStartSeconds = -1;
-      String errorMessage = "Not setting last mist time: invalid value";
-      client.publish(mqttErrors, errorMessage);
-      debug_println(errorMessage);
-    }
-  });
+  client.subscribe(mqttCommandEnableMisting, updateMistingEnabled);
 
-  client.subscribe(mqttCommandEnableMisting, [](const String & payload) {
-    if (payload == "1") {
-      settings.misting_enabled = true;
-    } else {
-      settings.misting_enabled = false;
-    }
-    saveConfig();
-  });
+  client.subscribe(mqttCommandSetMistIntervalMillis, updateMistInterval);
 
-  client.subscribe(mqttCommandSetMistIntervalMillis, [](const String & payload) {
-    int mistMillis = payload.toInt();
-    if (mistMillis < 500) {
-      String errorMessage = "Mist interval should be >= 500 ms";
-      client.publish(mqttErrors, errorMessage);
-      debug_println(errorMessage);
-    } else if (mistMillis <= settings.mist_duration_millis) {
-      client.publish(mqttErrors, "Mist interval should be greater than mist duration");
-      debug_printf(
-        "Mist interval should be greater than mist duration: got %d, current mist duration is %d\n",
-        mistMillis,
-        settings.mist_duration_millis);
-    } else {
-      settings.mist_interval_millis = mistMillis;
-      debug_printf("Setting mist interval to %d ms\n", mistMillis);
-    }
-    saveConfig();
-    // update next misting time
-    client.publish(mqttNextMistTime, String(mistStartSeconds + settings.mist_interval_millis / 1000.0).c_str());
-  });
+  client.subscribe(mqttCommandSetMistDurationMillis, updateMistDuration);
 
-  client.subscribe(mqttCommandSetMistDurationMillis, [](const String & payload) {
-    int mistMillis = payload.toInt();
-    if (mistMillis < 500) {
-      String errorMessage = "Mist duration should be >= 500 ms";
-      client.publish(mqttErrors, errorMessage);
-      debug_println(errorMessage);
-    } else if (mistMillis > settings.mist_interval_millis) {
-      client.publish(mqttErrors, "Mist duration must be less than mist interval");
-      debug_printf(
-        "Mist duration must be less than mist interval (got %d, current mist interval is %d)\n",
-        mistMillis,
-        settings.mist_interval_millis);
-    } else {
-      settings.mist_duration_millis = mistMillis;
-      debug_printf("Setting mist duration to %d ms\n", mistMillis);
-    }
-    saveConfig();
-  });
+  client.subscribe(mqttCommandSetMinPSI, updateMinPSI);
 
-  client.subscribe(mqttCommandSetMinPSI, [](const String & payload) {
-    int PSI = payload.toInt();
-    if (PSI < 10) {
-      String errorMessage = "Min PSI should be >= 10";
-      client.publish(mqttErrors, errorMessage);
-      debug_println(errorMessage);
-    } else if (PSI >= settings.pump_max_pressure) {
-      client.publish(mqttErrors, "Min PSI must be less than max PSI");
-      debug_printf(
-        "Min PSI must be less than max PSI (current max PSI is %d)\n",
-        settings.pump_max_pressure);
-    }else {
-      settings.pump_min_pressure = PSI;
-      debug_printf("Setting min PSI to %d\n", PSI);
-    }
-    saveConfig();
-  });
-
-  client.subscribe(mqttCommandSetMaxPSI, [](const String & payload) {
-    int PSI = payload.toInt();
-    if (PSI > 115) {
-      String errorMessage = "Max PSI should be <= 115";
-      client.publish(mqttErrors, errorMessage);
-      debug_println(errorMessage);
-    } else if (PSI <= settings.pump_min_pressure) {
-      client.publish(mqttErrors, "Max PSI must be greater than min PSI");
-      debug_printf(
-        "Max PSI must be greater than min PSI (current min PSI is %d)\n",
-        settings.pump_min_pressure);
-    }else {
-      settings.pump_max_pressure = PSI;
-      debug_printf("Setting max PSI to %d\n", PSI);
-    }
-    saveConfig();
-  });
+  client.subscribe(mqttCommandSetMaxPSI, updateMaxPSI);
 
   // Publish a message to indicate connection
   client.publish("aero/status", "CONNECTED", true);
@@ -509,11 +541,17 @@ void setup() {
   publishConfig();
 }
 
+long last_print_millis = 0;
+
 void loop() {
   ArduinoOTA.handle();
   client.loop();
 
   if (client.getConnectionEstablishedCount() == 0 && millis() < 5000) {
+    if (millis() - last_print_millis > 500) {
+      Serial.printf("Waiting for connection, millis = %d\n", millis());
+      last_print_millis = millis();
+    }
     // wait 5 seconds for connections to be established
     return;
   }
@@ -521,12 +559,17 @@ void loop() {
   // Wait a short time after startup to receive last mist time from pi.
   // Otherwise, act like we haver never misted.
   if (client.isConnected() && mistStartSeconds == 0) {
+    if (millis() - last_print_millis > 500) {
+      Serial.printf("Waiting for last mist time, millis = %d\n", millis());
+      last_print_millis = millis();
+    }
     // means we have never misted and have never received last mist time from pi
     if (millis() < 10000) {
       // wait a few seconds for pi to send last mist time
       return;
     }
     if (mistStartSeconds == 0) {
+      debug_println("Giving up waiting for last mist time from pi");
       mistStartSeconds = -1; // give up on waiting
     }
   }
@@ -582,20 +625,7 @@ void loop() {
   float temperature;
   float humidity;
 
-  if(measureEnvironment(&temperature, &humidity) == true )
-  {
-    debug_printf("T = %.1f deg. C (%.1f deg. F), H = %.1f%%\n",
-      temperature,
-      temperature * 9.0 / 5 + 32,
-      humidity);
-    client.publish(mqttTemp1, String(temperature).c_str(), true);
-    client.publish(mqttHumidity1, String(humidity).c_str(), true);
-
-    ambientPoint.clearFields();
-
-    ambientPoint.addField("temperature", temperature);
-    ambientPoint.addField("humidity", humidity);
-
-    writeToInfluxDB(ambientPoint);
+  if(measureTempAndHumidity(&temperature, &humidity) == true ) {
+    logTempAndHumidity(temperature, humidity);
   }
 }
