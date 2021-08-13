@@ -332,8 +332,28 @@ boolean reconnectMQTT() {
 // =============================
 // Misting state
 // =============================
-enum MistingState { none, mist, drain, full_drain, waiting };
+enum MistingState { none, waiting };
 MistingState mistingState = waiting; // start in waiting in case pressure is low
+
+// Blocking method to perform the mist cycle uninterrupted.
+void mist() {
+  digitalWrite(mistSolenoid, HIGH);
+  digitalWrite(drainSolenoid, LOW);
+  
+  delay(settings.mist_duration_millis);
+  
+  debug_println("Stopping misting");
+  debug_println("Starting draining");
+  digitalWrite(mistSolenoid, LOW);
+  digitalWrite(drainSolenoid, HIGH);
+
+  delay(drainDuration);
+  
+  debug_println("Stopping draining");
+  digitalWrite(drainSolenoid, LOW);
+  digitalWrite(mistSolenoid, LOW);
+  mistingState = none;
+}
 
 static void updateSolenoids() {
   static unsigned long drainStart = 0;
@@ -345,30 +365,11 @@ static void updateSolenoids() {
   }
 
   if (mistingState == none && millis() - lastMistTime > settings.mist_interval_millis) {
-    digitalWrite(mistSolenoid, HIGH);
-    digitalWrite(drainSolenoid, LOW);
-    lastMistTime = millis();
-    mistingState = mist;
-    mistStartSeconds = time(nullptr);
     logMisting();
-    return;
-  }
-  if (mistingState == mist && millis() - lastMistTime > settings.mist_duration_millis) {
-    // Stop misting, start draining
-    debug_printf("Stopping misting after %d millis\n", millis() - lastMistTime);
-    debug_println("Starting draining");
-    digitalWrite(mistSolenoid, LOW);
-    digitalWrite(drainSolenoid, HIGH);
-    drainStart = millis();
-    mistingState = drain;
-    return;
-  }
-  if (mistingState == drain && millis() - drainStart > drainDuration) {
-    // Stop draining
-    debug_printf("Stopping draining after %d millis\n", millis() - drainStart);
-    digitalWrite(drainSolenoid, LOW);
-    digitalWrite(mistSolenoid, LOW);
-    mistingState = none;
+    lastMistTime = millis();
+    mistStartSeconds = time(nullptr);
+    
+    mist();
     return;
   }
 }
@@ -408,11 +409,6 @@ void connectToInfluxDB() {
 void writeToInfluxDB(Point point) {
   if (WiFi.status() != WL_CONNECTED) {
     debug_println("Not writing to InfluxDB; no wifi connection");
-    return;
-  }
-  if (mistingState == mist || mistingState == drain) {
-    // Writing is too slow to do during precise time events
-    debug_println("Skipping InfluxDB write due to misting");
     return;
   }
   debug_printf("Writing: %s\n", point.toLineProtocol().c_str());
@@ -477,14 +473,6 @@ float analogToPSI(const float& analogReading) {
 
 static bool measurePressure(float *pressure) {
   static unsigned long measurement_timestamp = millis();
-
-  if (mistingState == mist) {
-    // Don't do anything while misting.
-    // It doesn't actually seem to affect the readings currently,
-    // but I'm not sure it won't, and we anyway we don't want to
-    // do anything in response to pressure reading this while misting.
-    return false;
-  }
 
   float averageReading = 0;
   if (millis() - measurement_timestamp > 5000) {
