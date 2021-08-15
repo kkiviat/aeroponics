@@ -3,11 +3,27 @@ const char MAIN_page[] PROGMEM = R"=====(
 <html>
 <body>
 <style>
+.section {
+  border: 1px solid black;
+  margin: 1em;
+  padding: 1em;
+  background-color: lightblue;
+  font-family: Arial;
+}
+
+div {
+  padding: 0.5em;
+}
+
+.backendvalue {
+  font-weight: bold;
+}
+
 input[type=checkbox] {
   display: none;
 }
 
-input[type=checkbox] + label {
+input[type=checkbox] + label > span {
   display: inline-block;
   background-color: #DB574D;
   color: white;
@@ -20,20 +36,20 @@ input[type=checkbox] + label {
   width: 80px;
 }
 
-input[type=checkbox] + label,
-input[type=checkbox] + label i {
+input[type=checkbox] + label > span,
+input[type=checkbox] + label  > span i {
   -webkit-transition: all 200ms ease;
   -moz-transition: all 200ms ease;
   -o-transition: all 200ms ease;
   transition: all 200ms ease;
 }
 
-input[type=checkbox]:checked + label {
+input[type=checkbox]:checked + label > span {
   background-color: #67B04F;
 }
 
-input[type=checkbox] + label:before,
-input[type=checkbox] + label:after,
+input[type=checkbox] + label > span:before,
+input[type=checkbox] + label > span:after,
 input[type=checkbox] + label i {
   width: 50%;
   display: inline-block;
@@ -41,15 +57,15 @@ input[type=checkbox] + label i {
   text-align: center;
 }
 
-input[type=checkbox] + label:before {
+input[type=checkbox] + label > span:before {
   content: attr(data-text-true);
 }
 
-input[type=checkbox] + label:after {
+input[type=checkbox] + label > span:after {
   content: attr(data-text-false);
 }
 
-input[type=checkbox] + label i {
+input[type=checkbox] + label > span i {
   top: 10%;
   background-color: white;
   height: 80%;
@@ -58,10 +74,11 @@ input[type=checkbox] + label i {
   width: 45%;
 }
 
-input[type=checkbox]:checked + label i {
+input[type=checkbox]:checked + label > span i {
   left: 50%;
 }
 </style>
+
 
 <script>
 function sendData(field, onSuccess = ()=>{}, value = null) {
@@ -110,6 +127,11 @@ function sendPumpStatus() {
   sendData('PumpStatus', getPumpStatus, value);
 }
 
+function sendPumpOverride() {
+  let value = document.getElementById("PumpOverride").checked ? "1" : "0";
+  sendData('PumpOverride', getPumpOverride, value);
+}
+
 function getSwitchValue(field) {
   var xhttp = new XMLHttpRequest();
   xhttp.onreadystatechange = function() {
@@ -127,6 +149,10 @@ function getMistStatus() {
 
 function getPumpStatus() {
   getSwitchValue('PumpStatus');
+}
+
+function getPumpOverride() {
+  getSwitchValue('PumpOverride');
 }
 
 // Retrieves the specified field and sets that field's value.
@@ -177,12 +203,11 @@ setInterval(function() {
 
 </script>
 
-<div id="Misting">
+<div class="section" id="Misting">
 <h1>Misting</h1>
 <div>
-    <label for="MistDuration">Misting:</label>
     <input type="checkbox" id="MistStatus" onclick="sendMistStatus()">
-    <label for="MistStatus" data-text-true="ON" data-text-false="OFF"><i></i></label>
+    <label for="MistStatus"><span data-text-true="ON" data-text-false="OFF"><i></i></span> Misting Cycle </label>
     <script type="text/javascript"> getMistStatus(); </script>
 </div>
 <form action="javascript:sendMistDuration()">
@@ -206,15 +231,19 @@ setInterval(function() {
 
 </div>
 
+<div class="section" id="pump">
 <h1>Pump</h1>
 <div>
-  <label for="PumpStatus">Pump:</label>
-  <input type="checkbox" id="PumpStatus" onclick="sendPumpStatus()">
-  <label for="PumpStatus" data-text-true="ON" data-text-false="OFF"><i></i></label>
-  <script type="text/javascript"> getPumpStatus(); </script>
+    <input type="checkbox" id="PumpStatus" onclick="sendPumpStatus()">
+    <label for="PumpStatus"><span data-text-true="ON" data-text-false="OFF"><i></i></span> Pump </label>
+    <script type="text/javascript"> getPumpStatus(); </script>
+
+  <input type="checkbox" id="PumpOverride" onclick="sendPumpOverride()">
+    <label for="PumpOverride"><span data-text-true="ON" data-text-false="OFF"><i></i></span> Pump Override </label>
+  <script type="text/javascript"> getPumpOverride(); </script>
 </div>
 <div>
-  Current pressure: <span id="Pressure"></span>
+  Current pressure: <span class="backendvalue" id="Pressure"></span>
 </div>
 <form action="javascript:sendMinPSI()">
   <div>
@@ -235,7 +264,6 @@ setInterval(function() {
     <input type="submit">
   </div>
 </form>
-
 </div>
 
 </body>

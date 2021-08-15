@@ -35,6 +35,7 @@ unsigned long lastMistTime = 0; // time of last misting in millis since start
 int mistStartSeconds = 0; // time of last misting in epoch seconds; 0 means nothing has happened
 
 bool pumpOn = false;
+bool pumpOverride = false; // To force pump on for draining
 
 float pressure;
 
@@ -528,6 +529,10 @@ void updatePump(float pressure) {
     digitalWrite(pumpRelay, LOW);
     return;
   }
+  if (pumpOverride) {
+    digitalWrite(pumpRelay, HIGH);
+    return;
+  }
   if (pressure > settings.pump_min_pressure) {
     lastPressureReadingLow = false;
   } else if (!pumpOn) {
@@ -609,6 +614,7 @@ void setupOTA() {
 #define MIST_STATUS_ID "MistStatus"
 #define PUMP_STATUS_ID "PumpStatus"
 #define PRESSURE_ID "Pressure"
+#define PUMP_OVERRIDE_ID "PumpOverride"
 
 void handleRoot() {
   String s = MAIN_page; //Read HTML contents
@@ -632,6 +638,8 @@ void handleSetValue() {
     updateMistingEnabled(value.c_str());
   } else if (field.equals(PUMP_STATUS_ID)) {
     updatePumpEnabled(value.c_str());
+  } else if (field.equals(PUMP_OVERRIDE_ID)) {
+    pumpOverride = value.equals("1") ? true : false;
   } else {
     debug_printf("Received unsupported field from server: %s\n", field.c_str());
     return;
@@ -656,6 +664,8 @@ void handleGetValue() {
     value = String(settings.misting_enabled);
   } else if (field.equals(PUMP_STATUS_ID)) {
     value = String(settings.pump_enabled);
+  } else if (field.equals(PUMP_OVERRIDE_ID)) {
+    value = String(pumpOverride);
   } else if (field.equals(PRESSURE_ID)) {
     value = String(pressure);
   } else {
