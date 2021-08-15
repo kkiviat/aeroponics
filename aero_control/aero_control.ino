@@ -5,8 +5,11 @@
 #include <ESP_EEPROM.h>
 #include <InfluxDbClient.h>
 #include <InfluxDbCloud.h>
+#include <ESP8266WebServer.h>
+
 
 #include "config.h"
+#include "index.h"
 
 #define DEBUG
 
@@ -32,6 +35,10 @@ unsigned long lastMistTime = 0; // time of last misting in millis since start
 int mistStartSeconds = 0; // time of last misting in epoch seconds; 0 means nothing has happened
 
 bool pumpOn = false;
+
+float pressure;
+
+ESP8266WebServer server(80);
 
 // =============================
 // Pin definitions
@@ -150,8 +157,7 @@ void publishConfig() {
 // =============================
 // Callbacks
 // =============================
-void updateMistInterval(const char* payload) {
-  int mistMillis = atoi(payload);
+void updateMistInterval(int mistMillis) {
   if (mistMillis < 500) {
     String errorMessage = "Mist interval should be >= 500 ms";
     client.publish(mqttErrors, errorMessage.c_str());
@@ -171,8 +177,7 @@ void updateMistInterval(const char* payload) {
   client.publish(mqttNextMistTime, String(mistStartSeconds + settings.mist_interval_millis / 1000.0).c_str());
 }
 
-void updateMistDuration(const char* payload) {
-  int mistMillis = atoi(payload);
+void updateMistDuration(int mistMillis) {
   if (mistMillis < 500) {
     String errorMessage = "Mist duration should be >= 500 ms";
     client.publish(mqttErrors, errorMessage.c_str());
@@ -190,8 +195,7 @@ void updateMistDuration(const char* payload) {
   saveConfig();
 }
 
-void updateLastMistTime(const char* payload) {
-  int receivedMistTime = atoi(payload);
+void updateLastMistTime(long receivedMistTime) {
   if (receivedMistTime > mistStartSeconds) {
     mistStartSeconds = receivedMistTime;
     // Set the lastMistTime millis based on the time since the last recorded misting
@@ -224,8 +228,16 @@ void updateMistingEnabled(const char* payload) {
   saveConfig();
 }
 
-void updateMinPSI(const char* payload) {
-  int PSI = atoi(payload);
+void updatePumpEnabled(const char* payload) {
+  if (payload[0] == '1') {
+    settings.pump_enabled = true;
+  } else {
+    settings.pump_enabled = false;
+  }
+  saveConfig();
+}
+
+void updateMinPSI(int PSI) {
   if (PSI < 10) {
     String errorMessage = "Min PSI should be >= 10";
     client.publish(mqttErrors, errorMessage.c_str());
@@ -242,8 +254,7 @@ void updateMinPSI(const char* payload) {
   saveConfig();
 }
 
-void updateMaxPSI(const char* payload) {
-  int PSI = atoi(payload);
+void updateMaxPSI(int PSI) {
   if (PSI > 115) {
     String errorMessage = "Max PSI should be <= 115";
     client.publish(mqttErrors, errorMessage.c_str());
@@ -284,7 +295,7 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
   message[length] = NULL;
   
   if (strcmp(topic, mqttPiLastMistTime) == 0) {
-    updateLastMistTime(message);
+    updateLastMistTime(atoi(message));
     return;
   }
   if (strcmp(topic, mqttCommandEnableMisting) == 0) {
@@ -292,19 +303,19 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
   if (strcmp(topic, mqttCommandSetMistIntervalMillis) == 0) {
-    updateMistInterval(message);
+    updateMistInterval(atoi(message));
     return;
   }
   if (strcmp(topic, mqttCommandSetMistDurationMillis) == 0) {
-    updateMistDuration(message);
+    updateMistDuration(atoi(message));
     return;
   }
   if (strcmp(topic, mqttCommandSetMinPSI) == 0) {
-    updateMinPSI(message);
+    updateMinPSI(atoi(message));
     return;
   }
   if (strcmp(topic, mqttCommandSetMaxPSI) == 0) {
-    updateMaxPSI(message);
+    updateMaxPSI(atoi(message));
     return;
   }
   debug_printf("Got topic %s that is not handled!\n", topic);
@@ -327,6 +338,45 @@ boolean reconnectMQTT() {
     publishConfig();
   }
   return client.connected();
+}
+
+// =============================
+// InfluxDB
+// =============================
+
+// Set timezone string according to https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
+#define TZ_INFO "PST8PDT"
+
+// InfluxDB client instance with preconfigured InfluxCloud certificate
+InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
+
+// Data point
+Point ambientPoint("ambient");
+Point pressurePoint("pressure");
+Point pumpStatusPoint("pump");
+Point mistingTimePoint("misting");
+
+void connectToInfluxDB() {
+  // Check InfluxDB server connection
+  if (influxClient.validateConnection()) {
+    debug_printf("Connected to InfluxDB: %s\n", influxClient.getServerUrl().c_str());
+  } else {
+    client.publish(mqttErrors, influxClient.getLastErrorMessage().c_str());
+    debug_printf("InfluxDB connection failed: %s\n", influxClient.getLastErrorMessage().c_str());
+  }
+}
+
+void writeToInfluxDB(Point point) {
+  if (WiFi.status() != WL_CONNECTED) {
+    debug_println("Not writing to InfluxDB; no wifi connection");
+    return;
+  }
+  debug_printf("Writing: %s\n", point.toLineProtocol().c_str());
+
+  if (!influxClient.writePoint(point)) {
+    debug_printf("InfluxDB write failed: %s\n", influxClient.getLastErrorMessage().c_str());
+    client.publish(mqttErrors, influxClient.getLastErrorMessage().c_str());
+  }
 }
 
 // =============================
@@ -370,6 +420,7 @@ static void updateSolenoids() {
     mistStartSeconds = time(nullptr);
     
     mist();
+
     return;
   }
 }
@@ -378,45 +429,12 @@ static void updateSolenoids() {
 void logMisting() {
   client.publish(mqttLastMistTime, String(mistStartSeconds).c_str());
   client.publish(mqttNextMistTime, String(mistStartSeconds + settings.mist_interval_millis / 1000.0).c_str());
-}
 
+  mistingTimePoint.clearFields();
 
-// =============================
-// InfluxDB
-// =============================
+  mistingTimePoint.addField("event", 1);
 
-// Set timezone string according to https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
-#define TZ_INFO "PST8PDT"
-
-// InfluxDB client instance with preconfigured InfluxCloud certificate
-InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
-
-// Data point
-Point ambientPoint("ambient");
-Point pressurePoint("pressure");
-Point pumpStatusPoint("pump");
-
-void connectToInfluxDB() {
-  // Check InfluxDB server connection
-  if (influxClient.validateConnection()) {
-    debug_printf("Connected to InfluxDB: %s\n", influxClient.getServerUrl());
-  } else {
-    client.publish(mqttErrors, influxClient.getLastErrorMessage().c_str());
-    debug_printf("InfluxDB connection failed: %s\n", influxClient.getLastErrorMessage().c_str());
-  }
-}
-
-void writeToInfluxDB(Point point) {
-  if (WiFi.status() != WL_CONNECTED) {
-    debug_println("Not writing to InfluxDB; no wifi connection");
-    return;
-  }
-  debug_printf("Writing: %s\n", point.toLineProtocol().c_str());
-
-  if (!influxClient.writePoint(point)) {
-    debug_printf("InfluxDB write failed: %s\n", influxClient.getLastErrorMessage().c_str());
-    client.publish(mqttErrors, influxClient.getLastErrorMessage().c_str());
-  }
+  writeToInfluxDB(mistingTimePoint);
 }
 
 // =============================
@@ -505,6 +523,40 @@ void logPressure(float pressure) {
   writeToInfluxDB(pressurePoint);
 }
 
+void updatePump(float pressure) {
+  if (!settings.pump_enabled) {
+    digitalWrite(pumpRelay, LOW);
+    return;
+  }
+  if (pressure > settings.pump_min_pressure) {
+    lastPressureReadingLow = false;
+  } else if (!pumpOn) {
+    if (lastPressureReadingLow) {
+      lastPressureReadingLow = false;
+      digitalWrite(pumpRelay, HIGH);
+      debug_println("turning pump on");
+      pumpOn = true;
+      logPumpStatus();
+    } else {
+      lastPressureReadingLow = true;
+    }
+  }
+
+  if (pressure <= settings.pump_max_pressure) {
+    lastPressureReadingHigh = false;
+  } else if (pumpOn) {
+    if (lastPressureReadingHigh) { // Get two in a row
+      lastPressureReadingHigh = false;
+      digitalWrite(pumpRelay, LOW);
+      pumpOn = false;
+      debug_println("turning pump off");
+      logPumpStatus();
+    } else {
+      lastPressureReadingHigh = true;
+    }
+  }
+}
+
 // =============================
 // OTA
 // =============================
@@ -548,6 +600,73 @@ void setupOTA() {
 }
 
 // =============================
+// Server
+// =============================
+#define MIST_DURATION_ID "MistDuration"
+#define MIST_INTERVAL_ID "MistInterval"
+#define MIN_PSI_ID "MinPSI"
+#define MAX_PSI_ID "MaxPSI"
+#define MIST_STATUS_ID "MistStatus"
+#define PUMP_STATUS_ID "PumpStatus"
+#define PRESSURE_ID "Pressure"
+
+void handleRoot() {
+  String s = MAIN_page; //Read HTML contents
+  server.send(200, "text/html", s); //Send web page
+}
+
+void handleSetValue() {
+  String value = server.arg("value");
+  String field = server.arg("field");
+  
+  Serial.println(value);
+  if (field.equals(MIST_DURATION_ID)) {
+    updateMistDuration(value.toInt());
+  } else if (field.equals(MIST_INTERVAL_ID)) {
+    updateMistInterval(value.toInt());
+  } else if (field.equals(MIN_PSI_ID)) {
+    updateMinPSI(value.toInt());
+  } else if (field.equals(MAX_PSI_ID)) {
+    updateMaxPSI(value.toInt());
+  } else if (field.equals(MIST_STATUS_ID)) {
+    updateMistingEnabled(value.c_str());
+  } else if (field.equals(PUMP_STATUS_ID)) {
+    updatePumpEnabled(value.c_str());
+  } else {
+    debug_printf("Received unsupported field from server: %s\n", field.c_str());
+    return;
+  }
+  
+  server.send(200, "text/plain", value);
+}
+
+void handleGetValue() {
+  String field = server.arg("field");
+  String value;
+  
+  if (field.equals(MIST_DURATION_ID)) {
+    value = String(settings.mist_duration_millis);
+  } else if (field.equals(MIST_INTERVAL_ID)) {
+    value = String(settings.mist_interval_millis);
+  } else if (field.equals(MIN_PSI_ID)) {
+    value = String(settings.pump_min_pressure);
+  } else if (field.equals(MAX_PSI_ID)) {
+    value = String(settings.pump_max_pressure);
+  } else if (field.equals(MIST_STATUS_ID)) {
+    value = String(settings.misting_enabled);
+  } else if (field.equals(PUMP_STATUS_ID)) {
+    value = String(settings.pump_enabled);
+  } else if (field.equals(PRESSURE_ID)) {
+    value = String(pressure);
+  } else {
+    debug_printf("Received unsupported field from server: %s\n", field.c_str());
+    return;
+  }
+  
+  server.send(200, "text/plain", value);
+}
+
+// =============================
 // Setup
 // =============================
 void setup() {
@@ -582,7 +701,7 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     setupOTA();
-    
+
     debug_println("Connecting to InfluxDB");
     lastInfluxConnectAttempt = millis();
     connectToInfluxDB();
@@ -611,11 +730,18 @@ void setup() {
   Serial.printf("Loaded config,%s from storage\n", ok ? "" : " not");
 
   publishConfig();
+
+  server.on("/", handleRoot);
+  server.on("/setValue", handleSetValue);
+  server.on("/getValue", handleGetValue);
+
+  server.begin();
 }
 
 void loop() {
   ArduinoOTA.handle();
   client.loop();
+  server.handleClient();
 
   // Wait a short time after startup to receive last mist time from pi.
   // Otherwise, act like we haver never misted.
@@ -644,38 +770,11 @@ void loop() {
     }
   }
 
-  float pressure;
   if (measurePressure(&pressure) == true) {
     debug_printf("pressure reading: %f\n", pressure);
     logPressure(pressure);
     
-    if (pressure > settings.pump_min_pressure) {
-      lastPressureReadingLow = false;
-    } else if (!pumpOn) {
-      if (lastPressureReadingLow) {
-        lastPressureReadingLow = false;
-        digitalWrite(pumpRelay, HIGH);
-        debug_println("turning pump on");
-        pumpOn = true;
-        logPumpStatus();
-      } else {
-        lastPressureReadingLow = true;
-      }
-    }
-
-    if (pressure <= settings.pump_max_pressure) {
-      lastPressureReadingHigh = false;
-    } else if (pumpOn) {
-      if (lastPressureReadingHigh) { // Get two in a row
-        lastPressureReadingHigh = false;
-        digitalWrite(pumpRelay, LOW);
-        pumpOn = false;
-        debug_println("turning pump off");
-        logPumpStatus();
-      } else {
-        lastPressureReadingHigh = true;
-      }
-    }
+    updatePump(pressure);
 
     if (pressure < settings.pump_min_pressure && settings.misting_enabled && mistingState != waiting) {
       // don't mist when pressure is too low
