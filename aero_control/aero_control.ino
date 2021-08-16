@@ -325,7 +325,7 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
 
 // Reconnect
 boolean reconnectMQTT() {
-  if (client.connect(MQTT_CLIENT, NULL, NULL, WILL_TOPIC, true, willQoS, WILL_MESSAGE)) {
+  if (client.connect(MQTT_CLIENT, MQTT_USERNAME, MQTT_PASSWD, WILL_TOPIC, true, willQoS, WILL_MESSAGE)) {
     client.subscribe(mqttPiLastMistTime);
     client.subscribe(mqttCommandEnableMisting);
     client.subscribe(mqttCommandSetMistIntervalMillis);
