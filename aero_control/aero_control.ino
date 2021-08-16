@@ -3,6 +3,8 @@
 #include <PubSubClient.h>
 #include <ESP_EEPROM.h>
 #include <ESP8266WebServer.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
 
 
 #include "config.h"
@@ -50,6 +52,12 @@ const int mistSolenoid = D1;  // GPIO5
 const int drainSolenoid = D2; // GPIO4
 // GPIO5, GPIO4 only pins low on boot
 // https://community.blynk.cc/t/esp8266-gpio-pins-info-restrictions-and-features/22872
+
+// =============================
+// NTP
+// =============================
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", -7*3600, 60000);
 
 // =============================
 // MQTT topics
@@ -189,10 +197,11 @@ void updateMistDuration(int mistMillis) {
 }
 
 void updateLastMistTime(long receivedMistTime) {
+  debug_printf("Received mist time of %d, mistStartSeconds=%d\n", receivedMistTime, mistStartSeconds);
   if (receivedMistTime > mistStartSeconds) {
     mistStartSeconds = receivedMistTime;
     // Set the lastMistTime millis based on the time since the last recorded misting
-    int millisSinceMisting = (time(NULL) - mistStartSeconds) * 1000;
+    int millisSinceMisting = (timeClient.getEpochTime() - mistStartSeconds) * 1000;
     if (millisSinceMisting > 0) {
       lastMistTime = millis() - millisSinceMisting;
       debug_printf("Setting last mist time millis to %d\n", lastMistTime);
@@ -200,7 +209,7 @@ void updateLastMistTime(long receivedMistTime) {
       mistStartSeconds = -1;
       String errorMessage = 
         "Not setting last mist time: it appears to be in the future. Time now: " 
-          + String(time(NULL));
+          + String(timeClient.getEpochTime());
       client.publish(mqttErrors, errorMessage.c_str());
       debug_println(errorMessage);
     }
@@ -369,9 +378,9 @@ static void updateSolenoids() {
   }
 
   if (mistingState == none && millis() - lastMistTime > settings.mist_interval_millis) {
-    logMisting();
     lastMistTime = millis();
-    mistStartSeconds = time(nullptr);
+    mistStartSeconds = timeClient.getEpochTime();
+    logMisting();
     
     mist();
 
@@ -426,11 +435,19 @@ void logPressure(float pressure) {
 
 void updatePump(float pressure) {
   if (!settings.pump_enabled) {
-    digitalWrite(pumpRelay, LOW);
+    if (pumpOn) {
+      pumpOn = false;
+      digitalWrite(pumpRelay, LOW);
+      logPumpStatus();
+    }
     return;
   }
   if (pumpOverride) {
-    digitalWrite(pumpRelay, HIGH);
+    if (!pumpOn) {
+      pumpOn = true;
+      digitalWrite(pumpRelay, HIGH);
+      logPumpStatus();
+    }
     return;
   }
   if (pressure > settings.pump_min_pressure) {
@@ -606,6 +623,10 @@ void setup() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    timeClient.begin();
+    timeClient.update();
+    Serial.println(timeClient.getFormattedTime());
+    
     setupOTA();
 
     // Attempt up to 3 times to initially connect to MQTT broker
@@ -644,6 +665,7 @@ void loop() {
   ArduinoOTA.handle();
   client.loop();
   server.handleClient();
+  timeClient.update();
 
   // Wait a short time after startup to receive last mist time from pi.
   // Otherwise, act like we haver never misted.
@@ -665,7 +687,7 @@ void loop() {
     reconnectWiFi();
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED) {    
     if (!client.connected() && millis() - lastMQTTConnectAttempt > reconnect_delay) {
       lastMQTTConnectAttempt = millis();
       reconnectMQTT();

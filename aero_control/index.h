@@ -222,7 +222,7 @@ setInterval(function() {
 <form action="javascript:sendMistInterval()">
   <div>
     <label for="MistInterval">Misting Interval (minutes):</label>
-    <input id="MistInterval" type="number" name="value" step="1" min="1" max="30" required>
+    <input id="MistInterval" type="number" name="value" step="0.5" min="0.5" max="30" required>
     <script type="text/javascript"> getMistInterval(); </script>
     <span class="validity"></span>
     <input type="submit">
