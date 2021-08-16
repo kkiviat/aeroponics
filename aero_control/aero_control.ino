@@ -1,10 +1,7 @@
 #include <ArduinoOTA.h>
-#include <dht_nonblocking.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <ESP_EEPROM.h>
-#include <InfluxDbClient.h>
-#include <InfluxDbCloud.h>
 #include <ESP8266WebServer.h>
 
 
@@ -28,7 +25,6 @@ const long reconnect_delay = 15000;
 
 long lastWifiConnectAttempt = 0;
 long lastMQTTConnectAttempt = 0;
-long lastInfluxConnectAttempt = 0;
 
 int drainDuration = 500; // 0.5 seconds
 unsigned long lastMistTime = 0; // time of last misting in millis since start
@@ -44,7 +40,6 @@ ESP8266WebServer server(80);
 // =============================
 // Pin definitions
 // =============================
-const int dhtPin = D5;
 const int solenoidRelay = D4;
 const int switchPin = D6;
 
@@ -60,8 +55,6 @@ const int drainSolenoid = D2; // GPIO4
 // MQTT topics
 // =============================
 // sensors
-#define mqttTemp1 "aero/temp1"
-#define mqttHumidity1 "aero/humidity1"
 #define mqttPressure "aero/pressure"
 
 #define mqttPumpStatus "aero/pump"
@@ -117,7 +110,6 @@ void setDefaultConfig() {
   settings.pump_min_pressure = 80;
   settings.pump_max_pressure = 100;
 }
-
 
 // Attempt to load config from EEPROM
 bool loadConfig() {
@@ -342,45 +334,6 @@ boolean reconnectMQTT() {
 }
 
 // =============================
-// InfluxDB
-// =============================
-
-// Set timezone string according to https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
-#define TZ_INFO "PST8PDT"
-
-// InfluxDB client instance with preconfigured InfluxCloud certificate
-InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
-
-// Data point
-Point ambientPoint("ambient");
-Point pressurePoint("pressure");
-Point pumpStatusPoint("pump");
-Point mistingTimePoint("misting");
-
-void connectToInfluxDB() {
-  // Check InfluxDB server connection
-  if (influxClient.validateConnection()) {
-    debug_printf("Connected to InfluxDB: %s\n", influxClient.getServerUrl().c_str());
-  } else {
-    client.publish(mqttErrors, influxClient.getLastErrorMessage().c_str());
-    debug_printf("InfluxDB connection failed: %s\n", influxClient.getLastErrorMessage().c_str());
-  }
-}
-
-void writeToInfluxDB(Point point) {
-  if (WiFi.status() != WL_CONNECTED) {
-    debug_println("Not writing to InfluxDB; no wifi connection");
-    return;
-  }
-  debug_printf("Writing: %s\n", point.toLineProtocol().c_str());
-
-  if (!influxClient.writePoint(point)) {
-    debug_printf("InfluxDB write failed: %s\n", influxClient.getLastErrorMessage().c_str());
-    client.publish(mqttErrors, influxClient.getLastErrorMessage().c_str());
-  }
-}
-
-// =============================
 // Misting state
 // =============================
 enum MistingState { none, waiting };
@@ -430,49 +383,6 @@ static void updateSolenoids() {
 void logMisting() {
   client.publish(mqttLastMistTime, String(mistStartSeconds).c_str());
   client.publish(mqttNextMistTime, String(mistStartSeconds + settings.mist_interval_millis / 1000.0).c_str());
-
-  mistingTimePoint.clearFields();
-
-  mistingTimePoint.addField("event", 1);
-
-  writeToInfluxDB(mistingTimePoint);
-}
-
-// =============================
-// Temperature and Humidity setup
-// =============================
-#define DHT_SENSOR_TYPE DHT_TYPE_11
-
-DHT_nonblocking dhtSensor(dhtPin, DHT_SENSOR_TYPE);
-const int temperatureInterval = 30000; // 30 seconds between readings
-
-static bool measureTempAndHumidity(float *temperature, float *humidity) {
-  static unsigned long measurementTimestamp = millis();
-
-  if (millis() - measurementTimestamp > temperatureInterval) {
-    if (dhtSensor.measure(temperature, humidity)) {
-      measurementTimestamp = millis();
-      return (true);
-    }
-  }
-
-  return (false);
-}
-
-void logTempAndHumidity(float temperature, float humidity) {
-  debug_printf("T = %.1f deg. C (%.1f deg. F), H = %.1f%%\n",
-      temperature,
-      temperature * 9.0 / 5 + 32,
-      humidity);
-  client.publish(mqttTemp1, String(temperature).c_str(), true);
-  client.publish(mqttHumidity1, String(humidity).c_str(), true);
-
-  ambientPoint.clearFields();
-
-  ambientPoint.addField("temperature", temperature);
-  ambientPoint.addField("humidity", humidity);
-
-  writeToInfluxDB(ambientPoint);
 }
 
 // =============================
@@ -508,20 +418,10 @@ static bool measurePressure(float *pressure) {
 
 void logPumpStatus() {
   client.publish(mqttPumpStatus, pumpOn ? "on" : "off", true);
-
-  pumpStatusPoint.clearFields();
-  pumpStatusPoint.addField("status", pumpOn ? 1 : 0);
-  
-  writeToInfluxDB(pumpStatusPoint);
 }
 
 void logPressure(float pressure) {
   client.publish(mqttPressure, String(pressure).c_str(), true);
-
-  pressurePoint.clearFields();
-  pressurePoint.addField("psi", pressure);
-
-  writeToInfluxDB(pressurePoint);
 }
 
 void updatePump(float pressure) {
@@ -705,16 +605,8 @@ void setup() {
     delay(1000);
   }
 
-  // Synchronize time with NTP servers and set timezone
-  // Accurate time is necessary for certificate validation and writing in batches
-  timeSync(TZ_INFO, "pool.ntp.org", "time.nis.gov");
-
   if (WiFi.status() == WL_CONNECTED) {
     setupOTA();
-
-    debug_println("Connecting to InfluxDB");
-    lastInfluxConnectAttempt = millis();
-    connectToInfluxDB();
 
     // Attempt up to 3 times to initially connect to MQTT broker
     int attempts = 0;
@@ -800,10 +692,4 @@ void loop() {
   }
 
   updateSolenoids();
-
-  float temperature;
-  float humidity;
-  if(measureTempAndHumidity(&temperature, &humidity) == true ) {
-    logTempAndHumidity(temperature, humidity);
-  }
 }
