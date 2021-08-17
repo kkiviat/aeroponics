@@ -85,6 +85,7 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", -7*3600, 60000);
 
 // misting
 #define mqttLastMistTime "aero/lastMistTime"
+#define mqttMistersOn "aero/mistersOn"
 #define mqttNextMistTime "aero/nextMistTime"
 #define mqttPiLastMistTime "aeroPi/lastMistTime" // sent from Pi on connection established
 
@@ -380,18 +381,26 @@ static void updateSolenoids() {
   if (mistingState == none && millis() - lastMistTime > settings.mist_interval_millis) {
     lastMistTime = millis();
     mistStartSeconds = timeClient.getEpochTime();
-    logMisting();
     
+    logMistingStart();
+
     mist();
+
+    logMistingStop();
 
     return;
   }
 }
 
 // Send the time of the last misting and the time of the next scheduled misting
-void logMisting() {
+void logMistingStart() {
   client.publish(mqttLastMistTime, String(mistStartSeconds).c_str());
   client.publish(mqttNextMistTime, String(mistStartSeconds + settings.mist_interval_millis / 1000.0).c_str());
+  client.publish(mqttMistersOn, "1");
+}
+
+void logMistingStop() {
+  client.publish(mqttMistersOn, "0");
 }
 
 // =============================
@@ -687,7 +696,7 @@ void loop() {
     reconnectWiFi();
   }
 
-  if (WiFi.status() == WL_CONNECTED) {    
+  if (WiFi.status() == WL_CONNECTED) {
     if (!client.connected() && millis() - lastMQTTConnectAttempt > reconnect_delay) {
       lastMQTTConnectAttempt = millis();
       reconnectMQTT();
