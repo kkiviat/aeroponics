@@ -1,3 +1,4 @@
 aero_control/config.h
 influxConfig.py
 __pycache__/
+docker/.env

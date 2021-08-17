@@ -1,0 +1,79 @@
+version: "3.3"
+services:
+  mosquitto:
+    image: eclipse-mosquitto
+    container_name: mosquitto
+    restart: always
+    expose:
+      - "1883"
+      - "9001"
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mosquitto-conf:/mosquitto/config
+      - mosquitto-logs:/mosquitto/logs
+      - mosquitto-data:/mosquitto/data
+
+  influxdb:
+    image: influxdb:1.8.9
+    container_name: influxdb
+    restart: always
+    ports:
+      - "8083:8083"
+      - "8086:8086"
+    environment:
+        - INFLUXDB_DB="aero"
+        - INFLUXDB_ADMIN_USER=${INFLUXDB_USERNAME}
+        - INFLUXDB_ADMIN_PASSWORD=${INFLUXDB_PASSWORD}
+    volumes:
+      - influxdb-storage:/var/lib/influxdb
+
+  chronograf:
+    image: chronograf:latest
+    container_name: chronograf
+    restart: always
+    ports:
+      - '127.0.0.1:8888:8888'
+    volumes:
+      - chronograf-storage:/var/lib/chronograf
+    depends_on:
+      - influxdb
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_USERNAME=${INFLUXDB_USERNAME}
+      - INFLUXDB_PASSWORD=${INFLUXDB_PASSWORD}
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USERNAME}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+    depends_on:
+      - influxdb
+    volumes:
+      - grafana-storage:/var/lib/grafana
+
+  mqtt-listener:
+    image: mqtt-listener:latest
+    container_name: mqtt-listener
+    restart: always
+    depends_on:
+      - influxdb
+      - mosquitto
+    environment:
+      - MQTT_USER=${MQTT_USERNAME}
+      - MQTT_PASS=${MQTT_PASSWORD}
+
+volumes:
+  influxdb-storage:
+  chronograf-storage:
+  grafana-storage:
+  mosquitto-conf:
+  mosquitto-data:
+  mosquitto-logs:
