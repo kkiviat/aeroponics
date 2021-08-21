@@ -23,7 +23,7 @@
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-const long reconnect_delay = 15000;
+const long reconnect_delay = 10000;
 
 long lastWifiConnectAttempt = 0;
 long lastMQTTConnectAttempt = 0;
@@ -284,7 +284,7 @@ void reconnectWiFi() {
   WiFi.begin(SSID, WIFI_PWD);
 }
 
-#define MQTT_SERVER "192.168.0.241"
+#define MQTT_SERVER "192.168.0.134"
 #define MQTT_CLIENT "AeroClient"
 #define WILL_TOPIC "aero/status"
 #define WILL_MESSAGE "DISCONNECTED"
@@ -439,7 +439,7 @@ void logPumpStatus() {
 }
 
 void logPressure(float pressure) {
-  client.publish(mqttPressure, String(pressure).c_str(), true);
+  client.publish(mqttPressure, String(pressure).c_str(), false);
 }
 
 void updatePump(float pressure) {
@@ -693,12 +693,14 @@ void loop() {
   // Handle reconnects
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiConnectAttempt > reconnect_delay) {
     lastWifiConnectAttempt = millis();
+    debug_println("Attempting to reconnect to WiFi");
     reconnectWiFi();
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     if (!client.connected() && millis() - lastMQTTConnectAttempt > reconnect_delay) {
       lastMQTTConnectAttempt = millis();
+      debug_println("Attempting to reconnect to MQTT");
       reconnectMQTT();
     }
   }
