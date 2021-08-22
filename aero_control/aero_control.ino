@@ -5,6 +5,7 @@
 #include <ESP8266WebServer.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#include <ESP8266mDNS.h>
 
 
 #include "config.h"
@@ -63,6 +64,16 @@ void startTimeClient() {
   timeClient.begin();
   timeClient.update();
   debug_println(timeClient.getFormattedTime());
+}
+
+// =============================
+// mDNS
+// =============================
+void startmDNS() {
+  if (!MDNS.begin("esp8266")) {
+    Serial.println("Error setting up mDNS!");
+  }
+  debug_println("mDNS started");
 }
 
 // =============================
@@ -692,6 +703,8 @@ void setup() {
   getConfig();
 
   publishConfig();
+
+  startmDNS();
 
   startServer();
 }
