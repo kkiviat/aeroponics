@@ -1,0 +1,7 @@
+influxdb==5.3.1
+influxdb-client==1.19.0
+RPi.GPIO==0.7.0
+adafruit-circuitpython-dht==3.6.1
+Adafruit-PlatformDetect==3.15.3
+Adafruit-PureIO==1.1.9
+paho-mqtt==1.5.1
