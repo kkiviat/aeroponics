@@ -48,6 +48,7 @@ static bool measureEC(float *EC) {
   if (millis() - measurementTimestamp > EC_MEASURE_INTERVAL) {
     measurementTimestamp = millis();
     *EC = ec.measureEC(ec.measureTemp());
+      debug_printf("actually measured EC: %.2f\n", *EC  );
     return(true);
   }
   return(false);
@@ -92,13 +93,13 @@ void calibrateECLow() {
 
 void calibratePHHigh() {
   Serial.println("Calibrating pH High");
-  ph.calibrateHigh(PH_HIGH_SOLUTION, ph.measureTemp());
+  ph.calibrateHigh(PH_HIGH_SOLUTION, ec.measureTemp());
   Serial.println("done");
 }
 
 void calibratePHLow() {
   Serial.println("Calibrating pH Low");
-  ph.calibrateHigh(PH_LOW_SOLUTION, ph.measureTemp());
+  ph.calibrateHigh(PH_LOW_SOLUTION, ec.measureTemp());
   Serial.println("done");
 }
 
@@ -106,16 +107,16 @@ void onConnectionEstablished() {
   mqttClient.subscribe(MQTT_CALIBRATE, [](const String & payload) {
     debug_println(payload);
     if (payload.equals("EC_HIGH")) {
-      //calibrateECHigh();
+      calibrateECHigh();
     }
     if (payload.equals("EC_LOW")) {
-      //calibrateECLow();
+      calibrateECLow();
     }
     if (payload.equals("PH_HIGH")) {
-      //calibratePHHigh();
+      calibratePHHigh();
     }
     if (payload.equals("PH_LOW")) {
-      //calibratePHLow();
+      calibratePHLow();
     }
   });
   
