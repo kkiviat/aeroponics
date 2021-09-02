@@ -1,19 +1,22 @@
 #!/usr/local/bin/python
-
+import paho.mqtt.publish as publish
+import paho.mqtt.client as mqtt
 import RPi.GPIO as GPIO
+import os
 import time
 import board
 import adafruit_dht
 from datetime import datetime
+from influxdb import InfluxDBClient
 
-import paho.mqtt.publish as publish
+username = os.environ['MQTT_USER']
+password = os.environ['MQTT_PASS']
 
-from influxdb_client import InfluxDBClient, Point, WritePrecision
-from influxdb_client.client.write_api import SYNCHRONOUS
-import influxConfig as cfg
+influx_client = InfluxDBClient('influxdb', 8086, database='aero')
 
-client = InfluxDBClient(url="https://us-central1-1.gcp.cloud2.influxdata.com", token=cfg.token)
-write_api = client.write_api(write_options=SYNCHRONOUS)
+mqttClient = mqtt.Client()
+mqttClient.username_pw_set(username, password=password)
+mqttClient.connect("mosquitto", 1883, 60)
 
 GPIO.setmode(GPIO.BCM)
 
@@ -27,6 +30,39 @@ last_light_read_time = 0
 last_dht_read_time = 0
 
 dhtDevice = adafruit_dht.DHT11(DHT_PIN, use_pulseio=False)
+
+def logTempAndHumidity(temp, humidity):
+    current_time = datetime.utcnow().isoformat()
+    json_body = [
+        {
+            "measurement": "ambient",
+            "tags": {},
+            "time": current_time,
+            "fields": {
+                "temperature": temperature,
+                "humidity": humidity,
+            }
+        }
+    ]
+    influx_client.write_points(json_body)
+    mqttClient.publish("aero/ambientTemp", temperature)
+    mqttClient.publish("aero/ambientHumidity", humidity)
+
+
+def logLight(light):
+    current_time = datetime.utcnow().isoformat()
+    json_body = [
+        {
+            "measurement": "light",
+            "tags": {},
+            "time": current_time,
+            "fields": {
+                "value": light
+            }
+        }
+    ]
+    influx_client.write_points(json_body)
+    mqttClient.publish("aero/light", light)
 
 def readDHT11():
     try:
@@ -64,12 +100,7 @@ try:
     while True:
         if time.time() - last_light_read_time > LIGHT_READ_INTERVAL:
             light = readLight(LIGHT_PIN)
-            point = Point("light") \
-                .tag("host", "raspberrypi") \
-                .field("light", light) \
-                .time(datetime.utcnow(), WritePrecision.NS) 
-            write_api.write(cfg.bucket, cfg.org, point)
-            publish.single("aero/light", light, hostname="localhost")
+            logLight(light)
             last_light_read_time = time.time()
 
         if time.time() - last_dht_read_time > DHT_READ_INTERVAL:
@@ -78,14 +109,7 @@ try:
                 last_dht_read_time = time.time()
                 temperature = result[0]
                 humidity = result[1]
-                point = Point("ambient") \
-                    .tag("host", "raspberrypi") \
-                    .field("temperature", temperature) \
-                    .field("humidity", humidity) \
-                    .time(datetime.utcnow(), WritePrecision.NS) 
-                write_api.write(cfg.bucket, cfg.org, point)
-                publish.single("aero/ambientTemp", temperature, hostname="localhost")
-                publish.single("aero/ambientHumidity", humidity, hostname="localhost")
+                logTempAndHumidity(temperature, humidity)
  
 except KeyboardInterrupt:
     pass

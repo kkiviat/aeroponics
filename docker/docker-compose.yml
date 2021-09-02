@@ -71,6 +71,17 @@ services:
       - MQTT_USER=${MQTT_USERNAME}
       - MQTT_PASS=${MQTT_PASSWORD}
 
+  monitor-environment:
+    privileged: true
+    image: monitor-environment:latest
+    container_name: monitor-environment
+    restart: always
+    depends_on:
+      - influxdb
+    environment:
+      - MQTT_USER=${MQTT_USERNAME}
+      - MQTT_PASS=${MQTT_PASSWORD}
+
 volumes:
   influxdb-storage:
   chronograf-storage:
